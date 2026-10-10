@@ -50,11 +50,14 @@ static const int32_t  DEFAULT_CORR_HZ = 0;
 static const uint16_t BAUD          = 1200;    // 512, 1200 or 2400
 static const bool     INVERT        = false;   // flip if nothing decodes on either side
 // Defaults, used until changed at runtime (/ric /mon /pwr) and stored with /save
-static const uint32_t DEFAULT_RIC   = 604552;  // DAPNET RIC 0604552 (from DMR ID 2604552). NO leading 0 - that would be octal!
+static const uint32_t DEFAULT_RIC   = 123456;  // placeholder; set your own (e.g. DAPNET RIC) with /ric. Never write a leading 0 here - that makes it octal!
 static const bool     DEFAULT_MON   = false;   // true = show every RIC on the channel
 static const int8_t   DEFAULT_PWR   = 10;      // dBm, PA_BOOST
 static const char*    BOARD_NAME    = "LilyGO T3 V1.6.1 / SX1278";
 static const int8_t   PWR_MIN = 2, PWR_MAX = 17;
+// shown in the web console next to the power setting
+static const char*    PWR_NOTE = "17 dBm (50 mW) is the SX1278 PA_BOOST limit for continuous use. "
+                                 "The chip's 20 dBm mode is rated for 1% duty cycle only, too little for long pages.";
 static const int      FREQ_STEP_HZ  = 61;      // synthesizer resolution
 static const bool     DEFAULT_LED   = true;    // status LED patterns, /led 0|1
 
@@ -64,6 +67,9 @@ static bool     monAll = DEFAULT_MON;
 static int8_t   txPwr  = DEFAULT_PWR;
 static bool     ledEnabled = DEFAULT_LED;
 static const bool DEFAULT_BLE = true;            // BLE console on/off, /ble 0|1
+static const char* DEFAULT_CALL = "XX9YYY";      // placeholder until you set yours with /call
+static char     callsign[12] = "XX9YYY";         // station callsign, /call
+static bool     autoId = true;                   // put callsign in front of text pages, /autoid 0|1
 static bool     bleEnabled = DEFAULT_BLE;
 static uint32_t blePin     = 0;                  // 6-digit pairing PIN, /blepin; default derived from MAC
 BleLink ble;
@@ -215,14 +221,15 @@ static void prepTx() {
 //   @RX  {...}   received message        @TX {...}  transmit result
 //   @CW  {...}   carrier on/off          @OK {...}  @ERR {...}
 static void emitCfg() {
-  char b[420];
+  char b[640];
   snprintf(b, sizeof b,
     "{\"board\":\"%s\",\"freq\":%.4f,\"corr\":%ld,\"eff\":%.5f,\"baud\":%u,\"inv\":%s,"
     "\"ric\":%lu,\"mon\":%s,\"pwr\":%d,\"pmin\":%d,\"pmax\":%d,\"step\":%d,\"led\":%s,"
-    "\"ble\":%s,\"blename\":\"%s\"}",
+    "\"ble\":%s,\"blename\":\"%s\",\"call\":\"%s\",\"autoid\":%s,\"pnote\":\"%s\"}",
     BOARD_NAME, FREQ_MHZ, (long)corrHz, curFreq(), BAUD, INVERT ? "true" : "false",
     (unsigned long)myRic, monAll ? "true" : "false", txPwr, PWR_MIN, PWR_MAX, FREQ_STEP_HZ,
-    ledEnabled ? "true" : "false", bleEnabled ? "true" : "false", ble.name().c_str());
+    ledEnabled ? "true" : "false", bleEnabled ? "true" : "false", ble.name().c_str(),
+    callsign, autoId ? "true" : "false", PWR_NOTE);
   emitEvt("CFG", String(b));
 }
 
@@ -243,6 +250,10 @@ static void applyFilter() {
 // kind: 'a' alphanumeric, 'n' numeric, 't' tone only
 static void doTx(uint32_t ric, char kind, String text) {   // by value: RadioLib wants String&
   if (ric > 2097151UL) { emitMsg("ERR", "RIC out of range (max 2097151)"); return; }
+  if (kind == 'a' && autoId && callsign[0]) {          // identify the station
+    String up = text; up.toUpperCase();
+    if (up.indexOf(callsign) < 0) text = String(callsign) + " " + text;
+  }
   prepTx();
   int16_t st;
   ledBusy();
@@ -281,12 +292,14 @@ static void help() {
     "  /cw [s]       unmodulated carrier for measuring (default 5 s, max 30)\n"
     "  /ric N        set own RIC (receive filter)\n"
     "  /mon 0|1      1 = show all RICs on the channel\n"
-    "  /pwr dBm      TX power\n"
+    "  /pwr dBm      TX power (see /cfg pmin..pmax for this board)\n"
     "  /led 0|1      status LED patterns off/on\n"
+    "  /call CALL    station callsign (/call - to clear)\n"
+    "  /autoid 0|1   put the callsign in front of text pages\n"
     "  /ble 0|1      Bluetooth LE console off/on\n"
     "  /blepin NNNNNN  BLE pairing PIN (6 digits)\n"
     "  /bleforget    forget all paired phones\n"
-    "  /save         store correction, RIC, monitor, power, LED and BLE settings in flash\n"
+    "  /save         store all settings in flash\n"
     "  /cfg          print configuration (@CFG line)\n"
     "  /cls          clear the OLED\n"
     "  /help\n"
@@ -331,6 +344,10 @@ static void handleCommand(String cmd) {
   else if (cmd == "/mon") { monAll = (n != 0); applyFilter(); }
   else if (cmd == "/pwr") {
     txPwr = (int8_t)constrain(n, (long)PWR_MIN, (long)PWR_MAX);
+    if (txPwr != n) {
+      char m[64]; snprintf(m, sizeof m, "power limited to %d dBm (board range %d..%d)", txPwr, PWR_MIN, PWR_MAX);
+      emitMsg("ERR", m);
+    }
     radio.standby();
     check(radio.setOutputPower(txPwr), "setOutputPower");
     startRx();
@@ -345,6 +362,8 @@ static void handleCommand(String cmd) {
     prefs.putBool("led", ledEnabled);
     prefs.putBool("ble", bleEnabled);
     prefs.putUInt("blepin", blePin);
+    prefs.putString("call", callsign);
+    prefs.putBool("autoid", autoId);
     logf("saved\n");
     emitMsg("OK", "settings saved");
   }
@@ -389,6 +408,17 @@ static void handleCommand(String cmd) {
     ble.forgetBonds();
     emitMsg("OK", "paired phones forgotten");
   }
+  else if (cmd == "/call") {
+    String c = arg; c.trim(); c.toUpperCase();
+    if (c == "-") c = "";
+    bool ok = c.length() <= 10;
+    for (size_t i = 0; ok && i < c.length(); i++) ok = isalnum((unsigned char)c[i]) || c[i] == '/';
+    if (!ok) { emitMsg("ERR", "callsign: up to 10 letters, digits or /"); return; }
+    strncpy(callsign, c.c_str(), sizeof(callsign) - 1); callsign[sizeof(callsign) - 1] = 0;
+    logf("CALL %s\n", callsign[0] ? callsign : "(none)");
+    emitCfg();
+  }
+  else if (cmd == "/autoid") { autoId = (n != 0); emitCfg(); }
   else if (cmd == "/cls") {
     if (oledOk) {
       oledLog.print('\f');            // u8log: clear log buffer, cursor to top-left
@@ -419,6 +449,8 @@ void setup() {
   ledEnabled = prefs.getBool("led", DEFAULT_LED);
   bleEnabled = prefs.getBool("ble", DEFAULT_BLE);
   blePin     = prefs.getUInt("blepin", BleLink::defaultPin());
+  prefs.getString("call", callsign, sizeof(callsign));
+  autoId     = prefs.getBool("autoid", true);
   const float f = curFreq();
 
   // Recent RadioLib uses a config struct; older releases take
@@ -436,6 +468,8 @@ void setup() {
        INVERT ? "inv" : "norm", (unsigned long)myRic);
   out.println("Send 'RIC:message' to transmit, /help for commands.");
   if (bleEnabled) bleStart();
+  if (!strcmp(callsign, DEFAULT_CALL)) logf("%s\nset /call!\n", callsign);
+  else logf("%s\n", callsign[0] ? callsign : "no callsign");
   emitCfg();
   ledBlink(2, 200);                  // booted
 }
