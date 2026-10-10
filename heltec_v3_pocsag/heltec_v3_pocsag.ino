@@ -28,6 +28,7 @@
 #include <U8x8lib.h>
 #include <stdarg.h>
 #include <Preferences.h>
+#include <Ticker.h>
 #include "pocsag_rx.h"
 
 #define PIN_SCK    9
@@ -54,6 +55,7 @@ static const int8_t   DEFAULT_PWR   = 10;       // dBm
 static const char*    BOARD_NAME    = "Heltec WiFi LoRa 32 V3 / SX1262";
 static const int8_t   PWR_MIN = -9, PWR_MAX = 22;
 static const int      FREQ_STEP_HZ  = 30;       // float frequency granularity at 440 MHz
+static const bool     DEFAULT_LED   = true;     // status LED patterns, /led 0|1
 static const float    RX_BW_KHZ     = 14.6;     // SX126x double-sided BW; 19.5 if far off frequency
 static const uint8_t  RX_BATCHES    = 3;        // batches captured per packet (max 3: 200 B <= 255 B)
 static const uint8_t  SYNC_LEN      = 3;        // use last 3 bytes of FSC so a few bits lost while
@@ -64,6 +66,35 @@ static int32_t  corrHz = DEFAULT_CORR_HZ;
 static uint32_t myRic  = DEFAULT_RIC;
 static bool     monAll = DEFAULT_MON;
 static int8_t   txPwr  = DEFAULT_PWR;
+static bool     ledEnabled = DEFAULT_LED;
+
+// ---------------- status LED ----------------
+// Driven from an esp_timer (Ticker), so it keeps blinking while loop() is blocked
+// inside pager.transmit() or the /cw carrier.
+//   TX / carrier    : fast blink 5 Hz for the whole transmission
+//   RX for own RIC  : 3 blinks          RX for other RIC (monitor mode): 1 blink
+//   idle            : 20 ms heartbeat flash every 5 s (receiver is alive)
+static Ticker ledTicker;
+static volatile int  ledToggles = 0;     // remaining edges, -1 = run until ledIdle()
+static volatile bool ledState   = false;
+static void ledWrite(bool on) { ledState = on; digitalWrite(PIN_LED, on ? HIGH : LOW); }
+static void ledTick() {                  // timer context: no detach here, just go quiet
+  if (ledToggles == 0) { if (ledState) ledWrite(false); return; }
+  ledWrite(!ledState);
+  if (ledToggles > 0) ledToggles--;
+}
+static void ledStart(int toggles, uint32_t halfPeriodMs) {
+  ledTicker.detach();
+  ledWrite(false);
+  if (!ledEnabled) return;
+  ledToggles = toggles;
+  ledTick();                             // first edge immediately
+  ledTicker.attach_ms(halfPeriodMs, ledTick);
+}
+static void ledBlink(int count, uint32_t periodMs) { ledStart(count * 2, periodMs / 2); }
+static void ledBusy() { ledStart(-1, 100); }
+static void ledIdle() { ledTicker.detach(); ledToggles = 0; ledWrite(false); }
+static bool ledQuiet() { return ledToggles == 0; }
 static Preferences prefs;
 static inline float curFreq() { return FREQ_MHZ + corrHz / 1e6f; }
 
@@ -129,7 +160,7 @@ static uint32_t lastPktMs = 0;
 static void IRAM_ATTR onPacket() { pktFlag = true; }
 
 static void onMessage(uint32_t ric, uint8_t func, const char* text, bool numeric, int fixes, int bad) {
-  digitalWrite(PIN_LED, HIGH);
+  if (ric == myRic) ledBlink(3, 300); else ledBlink(1, 150);
   logf("RX %lu f%u%s\n%s\n", (unsigned long)ric, func, bad ? " ERR" : (fixes ? " fix" : ""),
        text[0] ? text : "(tone)");
   float rssi = radio.getRSSI();
@@ -140,7 +171,6 @@ static void onMessage(uint32_t ric, uint8_t func, const char* text, bool numeric
   j += ",\"numeric\":" + String(numeric ? "true" : "false") + ",\"fixes\":" + String(fixes) +
        ",\"bad\":" + String(bad) + ",\"rssi\":" + String(rssi, 1) + "}";
   emitEvt("RX", j);
-  digitalWrite(PIN_LED, LOW);
 }
 pocsag::Decoder decoder(onMessage);
 
@@ -201,9 +231,10 @@ static void emitCfg() {
   char b[320];
   snprintf(b, sizeof b,
     "{\"board\":\"%s\",\"freq\":%.4f,\"corr\":%ld,\"eff\":%.5f,\"baud\":%u,\"inv\":%s,"
-    "\"ric\":%lu,\"mon\":%s,\"pwr\":%d,\"pmin\":%d,\"pmax\":%d,\"step\":%d}",
+    "\"ric\":%lu,\"mon\":%s,\"pwr\":%d,\"pmin\":%d,\"pmax\":%d,\"step\":%d,\"led\":%s}",
     BOARD_NAME, FREQ_MHZ, (long)corrHz, curFreq(), BAUD, INVERT ? "true" : "false",
-    (unsigned long)myRic, monAll ? "true" : "false", txPwr, PWR_MIN, PWR_MAX, FREQ_STEP_HZ);
+    (unsigned long)myRic, monAll ? "true" : "false", txPwr, PWR_MIN, PWR_MAX, FREQ_STEP_HZ,
+    ledEnabled ? "true" : "false");
   emitEvt("CFG", String(b));
 }
 
@@ -226,9 +257,11 @@ static void doTx(uint32_t ric, char kind, String text) {   // by value: RadioLib
   if (ric > 2097151UL) { emitMsg("ERR", "RIC out of range (max 2097151)"); return; }
   radio.standby();
   int16_t st;
+  ledBusy();
   if (kind == 't')      st = pager.sendTone(ric);
   else if (kind == 'n') st = pager.transmit(text, ric, RADIOLIB_PAGER_BCD);
   else                  st = pager.transmit(text, ric, RADIOLIB_PAGER_ASCII);
+  ledIdle();
   startRx();
   logf("TX %lu %s\n", (unsigned long)ric, st == RADIOLIB_ERR_NONE ? "ok" : "FAIL");
   String j = "{\"ric\":" + String(ric) + ",\"kind\":\"" + String(kind) + "\",\"ok\":" +
@@ -261,7 +294,8 @@ static void help() {
     "  /ric N        set own RIC (receive filter)\n"
     "  /mon 0|1      1 = show all RICs on the channel\n"
     "  /pwr dBm      TX power\n"
-    "  /save         store correction, RIC, monitor and power in flash\n"
+    "  /led 0|1      status LED patterns off/on\n"
+    "  /save         store correction, RIC, monitor, power and LED in flash\n"
     "  /cfg          print configuration (@CFG line)\n"
     "  /cls          clear the OLED\n"
     "  /help\n"
@@ -299,6 +333,7 @@ static void handleCommand(String cmd) {
     prefs.putUInt("ric", myRic);
     prefs.putBool("mon", monAll);
     prefs.putChar("pwr", txPwr);
+    prefs.putBool("led", ledEnabled);
     logf("saved\n");
     emitMsg("OK", "settings saved");
   }
@@ -315,10 +350,17 @@ static void handleCommand(String cmd) {
     radio.standby();
     check(radio.setFrequency(curFreq()), "setFrequency");
     check(radio.transmitDirect(), "transmitDirect");               // continuous carrier
+    ledBusy();
     delay(secs * 1000);
+    ledIdle();
     startRx();
     logf("CW end\n");
     emitEvt("CW", "{\"on\":false}");
+  }
+  else if (cmd == "/led") {
+    ledEnabled = (n != 0);
+    if (ledEnabled) ledBlink(2, 200); else ledIdle();
+    emitCfg();
   }
   else if (cmd == "/cls") {
     if (oledOk) {
@@ -345,6 +387,7 @@ void setup() {
   myRic  = prefs.getUInt("ric", DEFAULT_RIC);
   monAll = prefs.getBool("mon", DEFAULT_MON);
   txPwr  = prefs.getChar("pwr", DEFAULT_PWR);
+  ledEnabled = prefs.getBool("led", DEFAULT_LED);
 
   radio.tcxoVoltage = 1.8;            // Heltec V3: TCXO powered from DIO3 at 1.8 V
   ConfigFSK_t cfg;
@@ -365,9 +408,17 @@ void setup() {
        BAUD, INVERT ? "inv" : "norm", (unsigned long)myRic);
   Serial.println("Send 'RIC:message' to transmit, /help for commands.");
   emitCfg();
+  ledBlink(2, 200);                  // booted
 }
 
 void loop() {
+  // heartbeat: short flash every 5 s while nothing else is showing
+  static uint32_t lastBeat = 0;
+  if (millis() - lastBeat > 5000) {
+    lastBeat = millis();
+    if (ledQuiet()) ledBlink(1, 40);
+  }
+
   if (pktFlag) { pktFlag = false; processPacket(); }
 
   // no follow-up packet within ~1 packet time -> close any open message

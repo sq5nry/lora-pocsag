@@ -189,6 +189,7 @@ fieldset:disabled{opacity:.55}
         <button class="btn" id="saveBtn" type="button">Save settings to board</button>
         <button class="btn" id="clsBtn" type="button">Clear OLED</button>
       </div>
+      <label class="check"><input type="checkbox" id="ledIn"> Blink the board LED on send, receive and heartbeat</label>
       <p class="dirty" id="dirty">Changes are active but not saved. They'll be lost when the board resets.</p>
     </section>
     </fieldset>
@@ -287,7 +288,7 @@ function fillRics(){
   for (const r of recentRics){ const o = document.createElement("option"); o.value = r; dl.appendChild(o); }
 }
 
-const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr].join("|") : "";
+const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led].join("|") : "";
 function renderCfg(){
   if (!cfg) return;
   $("board").textContent = cfg.board;
@@ -298,6 +299,7 @@ function renderCfg(){
   if (document.activeElement !== $("corrIn")) $("corrIn").value = cfg.corr;
   if (document.activeElement !== $("ricIn")) $("ricIn").value = cfg.ric;
   $("monIn").checked = !!cfg.mon;
+  $("ledIn").checked = cfg.led !== false;
   const p = $("pwrIn"); p.min = cfg.pmin; p.max = cfg.pmax;
   if (document.activeElement !== p) p.value = cfg.pwr;
   if (!$("txRic").value) $("txRic").value = cfg.ric;
@@ -443,6 +445,7 @@ $("ricForm").onsubmit = e => {
 };
 $("monIn").onchange = () => send(`/mon ${$("monIn").checked ? 1 : 0}`);
 $("pwrForm").onsubmit = e => { e.preventDefault(); const v = parseInt($("pwrIn").value, 10); if (!isNaN(v)) send(`/pwr ${v}`); };
+$("ledIn").onchange = () => send(`/led ${$("ledIn").checked ? 1 : 0}`);
 $("saveBtn").onclick = () => send("/save");
 $("clsBtn").onclick = () => send("/cls");
 $("clearMsgs").onclick = () => { messages = []; store.set("pocsag.msgs", messages); renderMsgs(); };

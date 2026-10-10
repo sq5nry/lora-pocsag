@@ -27,6 +27,7 @@
 #include <U8x8lib.h>
 #include <stdarg.h>
 #include <Preferences.h>
+#include <Ticker.h>
 
 #define PIN_SCK   5
 #define PIN_MISO  19
@@ -38,6 +39,7 @@
 #define PIN_DIO2  32
 #define PIN_SDA   21
 #define PIN_SCL   22
+#define PIN_LED   25        // green user LED via R20 2k, active high
 
 // DAPNET channel; adjust to your own use
 static const float    FREQ_MHZ      = 439.9875;
@@ -53,11 +55,41 @@ static const int8_t   DEFAULT_PWR   = 10;      // dBm, PA_BOOST
 static const char*    BOARD_NAME    = "LilyGO T3 V1.6.1 / SX1278";
 static const int8_t   PWR_MIN = 2, PWR_MAX = 17;
 static const int      FREQ_STEP_HZ  = 61;      // synthesizer resolution
+static const bool     DEFAULT_LED   = true;    // status LED patterns, /led 0|1
 
 static int32_t  corrHz = DEFAULT_CORR_HZ;
 static uint32_t myRic  = DEFAULT_RIC;
 static bool     monAll = DEFAULT_MON;
 static int8_t   txPwr  = DEFAULT_PWR;
+static bool     ledEnabled = DEFAULT_LED;
+
+// ---------------- status LED ----------------
+// Driven from an esp_timer (Ticker), so it keeps blinking while loop() is blocked
+// inside pager.transmit() or the /cw carrier.
+//   TX / carrier    : fast blink 5 Hz for the whole transmission
+//   RX for own RIC  : 3 blinks          RX for other RIC (monitor mode): 1 blink
+//   idle            : 20 ms heartbeat flash every 5 s (receiver is alive)
+static Ticker ledTicker;
+static volatile int  ledToggles = 0;     // remaining edges, -1 = run until ledIdle()
+static volatile bool ledState   = false;
+static void ledWrite(bool on) { ledState = on; digitalWrite(PIN_LED, on ? HIGH : LOW); }
+static void ledTick() {                  // timer context: no detach here, just go quiet
+  if (ledToggles == 0) { if (ledState) ledWrite(false); return; }
+  ledWrite(!ledState);
+  if (ledToggles > 0) ledToggles--;
+}
+static void ledStart(int toggles, uint32_t halfPeriodMs) {
+  ledTicker.detach();
+  ledWrite(false);
+  if (!ledEnabled) return;
+  ledToggles = toggles;
+  ledTick();                             // first edge immediately
+  ledTicker.attach_ms(halfPeriodMs, ledTick);
+}
+static void ledBlink(int count, uint32_t periodMs) { ledStart(count * 2, periodMs / 2); }
+static void ledBusy() { ledStart(-1, 100); }
+static void ledIdle() { ledTicker.detach(); ledToggles = 0; ledWrite(false); }
+static bool ledQuiet() { return ledToggles == 0; }
 static Preferences prefs;
 static inline float curFreq() { return FREQ_MHZ + corrHz / 1e6f; }
 
@@ -180,9 +212,10 @@ static void emitCfg() {
   char b[320];
   snprintf(b, sizeof b,
     "{\"board\":\"%s\",\"freq\":%.4f,\"corr\":%ld,\"eff\":%.5f,\"baud\":%u,\"inv\":%s,"
-    "\"ric\":%lu,\"mon\":%s,\"pwr\":%d,\"pmin\":%d,\"pmax\":%d,\"step\":%d}",
+    "\"ric\":%lu,\"mon\":%s,\"pwr\":%d,\"pmin\":%d,\"pmax\":%d,\"step\":%d,\"led\":%s}",
     BOARD_NAME, FREQ_MHZ, (long)corrHz, curFreq(), BAUD, INVERT ? "true" : "false",
-    (unsigned long)myRic, monAll ? "true" : "false", txPwr, PWR_MIN, PWR_MAX, FREQ_STEP_HZ);
+    (unsigned long)myRic, monAll ? "true" : "false", txPwr, PWR_MIN, PWR_MAX, FREQ_STEP_HZ,
+    ledEnabled ? "true" : "false");
   emitEvt("CFG", String(b));
 }
 
@@ -205,9 +238,11 @@ static void doTx(uint32_t ric, char kind, String text) {   // by value: RadioLib
   if (ric > 2097151UL) { emitMsg("ERR", "RIC out of range (max 2097151)"); return; }
   prepTx();
   int16_t st;
+  ledBusy();
   if (kind == 't')      st = pager.sendTone(ric);
   else if (kind == 'n') st = pager.transmit(text, ric, RADIOLIB_PAGER_BCD);
   else                  st = pager.transmit(text, ric, RADIOLIB_PAGER_ASCII);
+  ledIdle();
   startRx();
   logf("TX %lu %s\n", (unsigned long)ric, st == RADIOLIB_ERR_NONE ? "ok" : "FAIL");
   String j = "{\"ric\":" + String(ric) + ",\"kind\":\"" + String(kind) + "\",\"ok\":" +
@@ -240,7 +275,8 @@ static void help() {
     "  /ric N        set own RIC (receive filter)\n"
     "  /mon 0|1      1 = show all RICs on the channel\n"
     "  /pwr dBm      TX power\n"
-    "  /save         store correction, RIC, monitor and power in flash\n"
+    "  /led 0|1      status LED patterns off/on\n"
+    "  /save         store correction, RIC, monitor, power and LED in flash\n"
     "  /cfg          print configuration (@CFG line)\n"
     "  /cls          clear the OLED\n"
     "  /help\n"
@@ -278,6 +314,7 @@ static void handleCommand(String cmd) {
     prefs.putUInt("ric", myRic);
     prefs.putBool("mon", monAll);
     prefs.putChar("pwr", txPwr);
+    prefs.putBool("led", ledEnabled);
     logf("saved\n");
     emitMsg("OK", "settings saved");
   }
@@ -294,10 +331,17 @@ static void handleCommand(String cmd) {
     prepTx();
     check(radio.setFrequency(curFreq()), "setFrequency");
     check(radio.transmitDirect(), "transmitDirect");               // continuous carrier
+    ledBusy();
     delay(secs * 1000);
+    ledIdle();
     startRx();
     logf("CW end\n");
     emitEvt("CW", "{\"on\":false}");
+  }
+  else if (cmd == "/led") {
+    ledEnabled = (n != 0);
+    if (ledEnabled) ledBlink(2, 200); else ledIdle();
+    emitCfg();
   }
   else if (cmd == "/cls") {
     if (oledOk) {
@@ -313,6 +357,8 @@ static void handleCommand(String cmd) {
 void setup() {
   Serial.begin(115200);
   delay(200);
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_LED, LOW);
   oledInit();
 
   // T3 uses non-default SPI pins; the default VSPI pins (SCK 18, MOSI 23) would clash
@@ -324,6 +370,7 @@ void setup() {
   myRic  = prefs.getUInt("ric", DEFAULT_RIC);
   monAll = prefs.getBool("mon", DEFAULT_MON);
   txPwr  = prefs.getChar("pwr", DEFAULT_PWR);
+  ledEnabled = prefs.getBool("led", DEFAULT_LED);
   const float f = curFreq();
 
   // Recent RadioLib uses a config struct; older releases take
@@ -341,9 +388,17 @@ void setup() {
        INVERT ? "inv" : "norm", (unsigned long)myRic);
   Serial.println("Send 'RIC:message' to transmit, /help for commands.");
   emitCfg();
+  ledBlink(2, 200);                  // booted
 }
 
 void loop() {
+  // heartbeat: short flash every 5 s while nothing else is showing
+  static uint32_t lastBeat = 0;
+  if (millis() - lastBeat > 5000) {
+    lastBeat = millis();
+    if (ledQuiet()) ledBlink(1, 40);
+  }
+
   // --- receive ---
   // 2 batches is enough for short/medium alphanumeric messages
   if (pager.available() >= 2) {
@@ -352,6 +407,7 @@ void loop() {
     int16_t st = pager.readData(msg, 0, &addr);
     if (st == RADIOLIB_ERR_NONE) {
       logf("RX %lu:\n%s\n", (unsigned long)addr, msg.c_str());
+      if (addr == myRic) ledBlink(3, 300); else ledBlink(1, 150);
       // RadioLib's pager RX doesn't expose function bits / error counts
       String j = "{\"ric\":" + String(addr) + ",\"func\":null,\"text\":";
       jsonStr(j, msg.c_str());
