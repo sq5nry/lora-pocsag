@@ -28,6 +28,7 @@
 #include <stdarg.h>
 #include <Preferences.h>
 #include <Ticker.h>
+#include "ble_link.h"          // BLE serial (Nordic UART), needs NimBLE-Arduino 2.x
 
 #define PIN_SCK   5
 #define PIN_MISO  19
@@ -62,6 +63,11 @@ static uint32_t myRic  = DEFAULT_RIC;
 static bool     monAll = DEFAULT_MON;
 static int8_t   txPwr  = DEFAULT_PWR;
 static bool     ledEnabled = DEFAULT_LED;
+static const bool DEFAULT_BLE = true;            // BLE console on/off, /ble 0|1
+static bool     bleEnabled = DEFAULT_BLE;
+static uint32_t blePin     = 0;                  // 6-digit pairing PIN, /blepin; default derived from MAC
+BleLink ble;
+DualOut out(ble);                                // everything we print: USB serial + paired BLE phone
 
 // ---------------- status LED ----------------
 // Driven from an esp_timer (Ticker), so it keeps blinking while loop() is blocked
@@ -112,7 +118,7 @@ static void logf(const char* fmt, ...) {
   va_start(ap, fmt);
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
-  Serial.print(buf);
+  out.print(buf);
   if (oledOk) oledLog.print(buf);   // wraps long lines, scrolls on '\n'
 }
 
@@ -128,7 +134,7 @@ static void jsonStr(String& o, const char* s) {
   o += '"';
 }
 static void emitEvt(const char* type, const String& json) {
-  Serial.print('@'); Serial.print(type); Serial.print(' '); Serial.println(json);
+  out.print('@'); out.print(type); out.print(' '); out.println(json);
 }
 static void emitMsg(const char* type, const char* msg) {
   String j = "{\"msg\":"; jsonStr(j, msg); j += "}"; emitEvt(type, j);
@@ -141,15 +147,15 @@ static uint8_t i2cScan(int sda, int scl) {
   Wire.setClock(100000);
   delay(5);
   uint8_t oledAddr = 0;
-  Serial.printf("[I2C] scan SDA=%d SCL=%d:", sda, scl);
+  out.printf("[I2C] scan SDA=%d SCL=%d:", sda, scl);
   for (uint8_t a = 0x08; a < 0x78; a++) {
     Wire.beginTransmission(a);
     if (Wire.endTransmission() == 0) {
-      Serial.printf(" 0x%02X", a);
+      out.printf(" 0x%02X", a);
       if (!oledAddr && (a == 0x3C || a == 0x3D)) oledAddr = a;
     }
   }
-  Serial.println(oledAddr ? "" : "  (no OLED)");
+  out.println(oledAddr ? "" : "  (no OLED)");
   return oledAddr;
 }
 
@@ -159,17 +165,17 @@ static void oledInit() {
   delay(50);                         // let the OLED RC reset (~5 ms) and its LDO settle
 
   // Diagnostic I2C scan - shows what is actually on the bus
-  Serial.print("[I2C] scan SDA=21 SCL=22:");
+  out.print("[I2C] scan SDA=21 SCL=22:");
   int found = 0;
   for (uint8_t a = 0x08; a < 0x78; a++) {
     Wire.beginTransmission(a);
-    if (Wire.endTransmission() == 0) { Serial.printf(" 0x%02X", a); found++; }
+    if (Wire.endTransmission() == 0) { out.printf(" 0x%02X", a); found++; }
   }
-  Serial.println(found ? "" : " nothing found");
+  out.println(found ? "" : " nothing found");
 
   Wire.beginTransmission(0x3C);
   uint8_t e = Wire.endTransmission();
-  if (e != 0) Serial.printf("[OLED] no ACK at 0x3C (err %u) - initialising anyway\n", e);
+  if (e != 0) out.printf("[OLED] no ACK at 0x3C (err %u) - initialising anyway\n", e);
 
   // Initialise regardless of the probe result; writes to a missing display are harmless.
   oled.setBusClock(400000);          // U8g2 sets the Wire clock itself on every transfer
@@ -209,13 +215,14 @@ static void prepTx() {
 //   @RX  {...}   received message        @TX {...}  transmit result
 //   @CW  {...}   carrier on/off          @OK {...}  @ERR {...}
 static void emitCfg() {
-  char b[320];
+  char b[420];
   snprintf(b, sizeof b,
     "{\"board\":\"%s\",\"freq\":%.4f,\"corr\":%ld,\"eff\":%.5f,\"baud\":%u,\"inv\":%s,"
-    "\"ric\":%lu,\"mon\":%s,\"pwr\":%d,\"pmin\":%d,\"pmax\":%d,\"step\":%d,\"led\":%s}",
+    "\"ric\":%lu,\"mon\":%s,\"pwr\":%d,\"pmin\":%d,\"pmax\":%d,\"step\":%d,\"led\":%s,"
+    "\"ble\":%s,\"blename\":\"%s\"}",
     BOARD_NAME, FREQ_MHZ, (long)corrHz, curFreq(), BAUD, INVERT ? "true" : "false",
     (unsigned long)myRic, monAll ? "true" : "false", txPwr, PWR_MIN, PWR_MAX, FREQ_STEP_HZ,
-    ledEnabled ? "true" : "false");
+    ledEnabled ? "true" : "false", bleEnabled ? "true" : "false", ble.name().c_str());
   emitEvt("CFG", String(b));
 }
 
@@ -262,7 +269,7 @@ static bool splitRicText(const String& s, uint32_t& ric, String& text) {
 }
 
 static void help() {
-  Serial.println(F(
+  out.println(F(
     "Commands:\n"
     "  RIC:text      transmit alphanumeric page\n"
     "  /n RIC:digits transmit numeric page (0-9 * U space - ( ) )\n"
@@ -276,11 +283,32 @@ static void help() {
     "  /mon 0|1      1 = show all RICs on the channel\n"
     "  /pwr dBm      TX power\n"
     "  /led 0|1      status LED patterns off/on\n"
-    "  /save         store correction, RIC, monitor, power and LED in flash\n"
+    "  /ble 0|1      Bluetooth LE console off/on\n"
+    "  /blepin NNNNNN  BLE pairing PIN (6 digits)\n"
+    "  /bleforget    forget all paired phones\n"
+    "  /save         store correction, RIC, monitor, power, LED and BLE settings in flash\n"
     "  /cfg          print configuration (@CFG line)\n"
     "  /cls          clear the OLED\n"
     "  /help\n"
     "Note: SX1278 synth step is 61 Hz; float frequency adds ~30 Hz granularity."));
+}
+
+static void bleStart() {
+  if (ble.begin(ble.name().length() ? ble.name() : BleLink::defaultName(), blePin))
+    logf("BLE %s\nPIN %06lu\n", ble.name().c_str(), (unsigned long)blePin);
+  else
+    logf("BLE start failed\n");
+}
+
+static void handleCommand(String cmd);
+// one input line from USB serial or BLE
+static void processLine(String line) {
+  line.trim();
+  if (line.length() == 0) return;
+  if (line.startsWith("/")) { handleCommand(line); return; }
+  uint32_t ric; String text;
+  if (splitRicText(line, ric, text)) doTx(ric, 'a', text);
+  else { out.println("Format: RIC:message"); emitMsg("ERR", "format is RIC:message"); }
 }
 
 static void handleCommand(String cmd) {
@@ -315,6 +343,8 @@ static void handleCommand(String cmd) {
     prefs.putBool("mon", monAll);
     prefs.putChar("pwr", txPwr);
     prefs.putBool("led", ledEnabled);
+    prefs.putBool("ble", bleEnabled);
+    prefs.putUInt("blepin", blePin);
     logf("saved\n");
     emitMsg("OK", "settings saved");
   }
@@ -343,12 +373,28 @@ static void handleCommand(String cmd) {
     if (ledEnabled) ledBlink(2, 200); else ledIdle();
     emitCfg();
   }
+  else if (cmd == "/ble") {
+    bleEnabled = (n != 0);
+    if (bleEnabled) bleStart(); else { ble.end(); logf("BLE off\n"); }
+    emitCfg();
+  }
+  else if (cmd == "/blepin") {
+    if (n < 100000 || n > 999999) { emitMsg("ERR", "PIN must have 6 digits"); return; }
+    blePin = (uint32_t)n;
+    ble.setPin(blePin);
+    logf("BLE PIN %06lu\n", (unsigned long)blePin);
+    emitMsg("OK", "PIN changed; /save to keep it, /bleforget to make paired phones pair again");
+  }
+  else if (cmd == "/bleforget") {
+    ble.forgetBonds();
+    emitMsg("OK", "paired phones forgotten");
+  }
   else if (cmd == "/cls") {
     if (oledOk) {
       oledLog.print('\f');            // u8log: clear log buffer, cursor to top-left
       oled.clearDisplay();             // blank the panel now (log redraws on next newline)
     }
-    Serial.println("OLED cleared");
+    out.println("OLED cleared");
     emitMsg("OK", "display cleared");
   }
   else { help(); emitMsg("ERR", "unknown command"); }
@@ -371,6 +417,8 @@ void setup() {
   monAll = prefs.getBool("mon", DEFAULT_MON);
   txPwr  = prefs.getChar("pwr", DEFAULT_PWR);
   ledEnabled = prefs.getBool("led", DEFAULT_LED);
+  bleEnabled = prefs.getBool("ble", DEFAULT_BLE);
+  blePin     = prefs.getUInt("blepin", BleLink::defaultPin());
   const float f = curFreq();
 
   // Recent RadioLib uses a config struct; older releases take
@@ -386,7 +434,8 @@ void setup() {
   startRx();
   logf("%.4f MHz\ncorr %+ld Hz\n%u bps %s\nRIC %lu\nListening...\n", f, (long)corrHz, BAUD,
        INVERT ? "inv" : "norm", (unsigned long)myRic);
-  Serial.println("Send 'RIC:message' to transmit, /help for commands.");
+  out.println("Send 'RIC:message' to transmit, /help for commands.");
+  if (bleEnabled) bleStart();
   emitCfg();
   ledBlink(2, 200);                  // booted
 }
@@ -420,13 +469,15 @@ void loop() {
   }
 
   // --- transmit ---
-  if (Serial.available()) {
-    String line = Serial.readStringUntil('\n');
-    line.trim();
-    if (line.length() == 0) return;
-    if (line.startsWith("/")) { handleCommand(line); return; }
-    uint32_t ric; String text;
-    if (splitRicText(line, ric, text)) doTx(ric, 'a', text);
-    else { Serial.println("Format: RIC:message"); emitMsg("ERR", "format is RIC:message"); }
+  if (Serial.available()) processLine(Serial.readStringUntil('\n'));
+
+  // --- BLE console ---
+  String bl;
+  if (ble.readLine(bl)) processLine(bl);
+  static bool bleWasConnected = false;
+  if (ble.connected() != bleWasConnected) {
+    bleWasConnected = ble.connected();
+    logf(bleWasConnected ? "BLE connected\n" : "BLE disconnected\n");
+    if (bleWasConnected) emitCfg();               // greet the phone with the current state
   }
 }

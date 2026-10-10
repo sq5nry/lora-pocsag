@@ -29,6 +29,7 @@
 #include <stdarg.h>
 #include <Preferences.h>
 #include <Ticker.h>
+#include "ble_link.h"          // BLE serial (Nordic UART), needs NimBLE-Arduino 2.x
 #include "pocsag_rx.h"
 
 #define PIN_SCK    9
@@ -67,6 +68,11 @@ static uint32_t myRic  = DEFAULT_RIC;
 static bool     monAll = DEFAULT_MON;
 static int8_t   txPwr  = DEFAULT_PWR;
 static bool     ledEnabled = DEFAULT_LED;
+static const bool DEFAULT_BLE = true;            // BLE console on/off, /ble 0|1
+static bool     bleEnabled = DEFAULT_BLE;
+static uint32_t blePin     = 0;                  // 6-digit pairing PIN, /blepin; default derived from MAC
+BleLink ble;
+DualOut out(ble);                                // everything we print: USB serial + paired BLE phone
 
 // ---------------- status LED ----------------
 // Driven from an esp_timer (Ticker), so it keeps blinking while loop() is blocked
@@ -111,7 +117,7 @@ static bool oledOk = false;
 static void logf(const char* fmt, ...) {
   char buf[256];
   va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
-  Serial.print(buf);
+  out.print(buf);
   if (oledOk) oledLog.print(buf);
 }
 
@@ -127,7 +133,7 @@ static void jsonStr(String& o, const char* s) {
   o += '"';
 }
 static void emitEvt(const char* type, const String& json) {
-  Serial.print('@'); Serial.print(type); Serial.print(' '); Serial.println(json);
+  out.print('@'); out.print(type); out.print(' '); out.println(json);
 }
 static void emitMsg(const char* type, const char* msg) {
   String j = "{\"msg\":"; jsonStr(j, msg); j += "}"; emitEvt(type, j);
@@ -164,7 +170,7 @@ static void onMessage(uint32_t ric, uint8_t func, const char* text, bool numeric
   logf("RX %lu f%u%s\n%s\n", (unsigned long)ric, func, bad ? " ERR" : (fixes ? " fix" : ""),
        text[0] ? text : "(tone)");
   float rssi = radio.getRSSI();
-  Serial.printf("   [%s, %d corrected, %d bad codewords, RSSI %.1f dBm]\n",
+  out.printf("   [%s, %d corrected, %d bad codewords, RSSI %.1f dBm]\n",
                 numeric ? "numeric" : "alpha", fixes, bad, rssi);
   String j = "{\"ric\":" + String(ric) + ",\"func\":" + String(func) + ",\"text\":";
   jsonStr(j, text);
@@ -207,7 +213,7 @@ static void processPacket() {
   uint8_t buf[PKT_LEN];
   int16_t st = radio.readData(buf, PKT_LEN);
   lastPktMs = millis();
-  if (st != RADIOLIB_ERR_NONE) { Serial.printf("[RX] readData %d\n", st); return; }
+  if (st != RADIOLIB_ERR_NONE) { out.printf("[RX] readData %d\n", st); return; }
   if (!INVERT) for (size_t i = 0; i < PKT_LEN; i++) buf[i] = ~buf[i];
 
   size_t off = 0;
@@ -228,13 +234,14 @@ static void processPacket() {
 //   @RX  {...}   received message        @TX {...}  transmit result
 //   @CW  {...}   carrier on/off          @OK {...}  @ERR {...}
 static void emitCfg() {
-  char b[320];
+  char b[420];
   snprintf(b, sizeof b,
     "{\"board\":\"%s\",\"freq\":%.4f,\"corr\":%ld,\"eff\":%.5f,\"baud\":%u,\"inv\":%s,"
-    "\"ric\":%lu,\"mon\":%s,\"pwr\":%d,\"pmin\":%d,\"pmax\":%d,\"step\":%d,\"led\":%s}",
+    "\"ric\":%lu,\"mon\":%s,\"pwr\":%d,\"pmin\":%d,\"pmax\":%d,\"step\":%d,\"led\":%s,"
+    "\"ble\":%s,\"blename\":\"%s\"}",
     BOARD_NAME, FREQ_MHZ, (long)corrHz, curFreq(), BAUD, INVERT ? "true" : "false",
     (unsigned long)myRic, monAll ? "true" : "false", txPwr, PWR_MIN, PWR_MAX, FREQ_STEP_HZ,
-    ledEnabled ? "true" : "false");
+    ledEnabled ? "true" : "false", bleEnabled ? "true" : "false", ble.name().c_str());
   emitEvt("CFG", String(b));
 }
 
@@ -281,7 +288,7 @@ static bool splitRicText(const String& s, uint32_t& ric, String& text) {
 }
 
 static void help() {
-  Serial.println(F(
+  out.println(F(
     "Commands:\n"
     "  RIC:text      transmit alphanumeric page\n"
     "  /n RIC:digits transmit numeric page (0-9 * U space - ( ) )\n"
@@ -295,11 +302,32 @@ static void help() {
     "  /mon 0|1      1 = show all RICs on the channel\n"
     "  /pwr dBm      TX power\n"
     "  /led 0|1      status LED patterns off/on\n"
-    "  /save         store correction, RIC, monitor, power and LED in flash\n"
+    "  /ble 0|1      Bluetooth LE console off/on\n"
+    "  /blepin NNNNNN  BLE pairing PIN (6 digits)\n"
+    "  /bleforget    forget all paired phones\n"
+    "  /save         store correction, RIC, monitor, power, LED and BLE settings in flash\n"
     "  /cfg          print configuration (@CFG line)\n"
     "  /cls          clear the OLED\n"
     "  /help\n"
     "Note: RadioLib takes the frequency as float -> effective steps ~30 Hz at 440 MHz."));
+}
+
+static void bleStart() {
+  if (ble.begin(ble.name().length() ? ble.name() : BleLink::defaultName(), blePin))
+    logf("BLE %s\nPIN %06lu\n", ble.name().c_str(), (unsigned long)blePin);
+  else
+    logf("BLE start failed\n");
+}
+
+static void handleCommand(String cmd);
+// one input line from USB serial or BLE
+static void processLine(String line) {
+  line.trim();
+  if (line.length() == 0) return;
+  if (line.startsWith("/")) { handleCommand(line); return; }
+  uint32_t ric; String text;
+  if (splitRicText(line, ric, text)) doTx(ric, 'a', text);
+  else { out.println("Format: RIC:message"); emitMsg("ERR", "format is RIC:message"); }
 }
 
 static void handleCommand(String cmd) {
@@ -334,6 +362,8 @@ static void handleCommand(String cmd) {
     prefs.putBool("mon", monAll);
     prefs.putChar("pwr", txPwr);
     prefs.putBool("led", ledEnabled);
+    prefs.putBool("ble", bleEnabled);
+    prefs.putUInt("blepin", blePin);
     logf("saved\n");
     emitMsg("OK", "settings saved");
   }
@@ -362,12 +392,28 @@ static void handleCommand(String cmd) {
     if (ledEnabled) ledBlink(2, 200); else ledIdle();
     emitCfg();
   }
+  else if (cmd == "/ble") {
+    bleEnabled = (n != 0);
+    if (bleEnabled) bleStart(); else { ble.end(); logf("BLE off\n"); }
+    emitCfg();
+  }
+  else if (cmd == "/blepin") {
+    if (n < 100000 || n > 999999) { emitMsg("ERR", "PIN must have 6 digits"); return; }
+    blePin = (uint32_t)n;
+    ble.setPin(blePin);
+    logf("BLE PIN %06lu\n", (unsigned long)blePin);
+    emitMsg("OK", "PIN changed; /save to keep it, /bleforget to make paired phones pair again");
+  }
+  else if (cmd == "/bleforget") {
+    ble.forgetBonds();
+    emitMsg("OK", "paired phones forgotten");
+  }
   else if (cmd == "/cls") {
     if (oledOk) {
       oledLog.print('\f');            // u8log: clear log buffer, cursor to top-left
       oled.clearDisplay();             // blank the panel now (log redraws on next newline)
     }
-    Serial.println("OLED cleared");
+    out.println("OLED cleared");
     emitMsg("OK", "display cleared");
   }
   else { help(); emitMsg("ERR", "unknown command"); }
@@ -388,6 +434,8 @@ void setup() {
   monAll = prefs.getBool("mon", DEFAULT_MON);
   txPwr  = prefs.getChar("pwr", DEFAULT_PWR);
   ledEnabled = prefs.getBool("led", DEFAULT_LED);
+  bleEnabled = prefs.getBool("ble", DEFAULT_BLE);
+  blePin     = prefs.getUInt("blepin", BleLink::defaultPin());
 
   radio.tcxoVoltage = 1.8;            // Heltec V3: TCXO powered from DIO3 at 1.8 V
   ConfigFSK_t cfg;
@@ -406,7 +454,8 @@ void setup() {
 
   logf("%.4f MHz\ncorr %+ld Hz\n%u bps %s\nRIC %lu\nListening...\n", curFreq(), (long)corrHz,
        BAUD, INVERT ? "inv" : "norm", (unsigned long)myRic);
-  Serial.println("Send 'RIC:message' to transmit, /help for commands.");
+  out.println("Send 'RIC:message' to transmit, /help for commands.");
+  if (bleEnabled) bleStart();
   emitCfg();
   ledBlink(2, 200);                  // booted
 }
@@ -425,13 +474,15 @@ void loop() {
   const uint32_t pktMs = (PKT_LEN + 4) * 8 * 1000UL / BAUD;
   if (decoder.active() && millis() - lastPktMs > pktMs + 500) decoder.flush();
 
-  if (Serial.available()) {
-    String line = Serial.readStringUntil('\n');
-    line.trim();
-    if (line.length() == 0) return;
-    if (line.startsWith("/")) { handleCommand(line); return; }
-    uint32_t ric; String text;
-    if (splitRicText(line, ric, text)) doTx(ric, 'a', text);
-    else { Serial.println("Format: RIC:message"); emitMsg("ERR", "format is RIC:message"); }
+  if (Serial.available()) processLine(Serial.readStringUntil('\n'));
+
+  // --- BLE console ---
+  String bl;
+  if (ble.readLine(bl)) processLine(bl);
+  static bool bleWasConnected = false;
+  if (ble.connected() != bleWasConnected) {
+    bleWasConnected = ble.connected();
+    logf(bleWasConnected ? "BLE connected\n" : "BLE disconnected\n");
+    if (bleWasConnected) emitCfg();               // greet the phone with the current state
   }
 }

@@ -121,9 +121,10 @@ fieldset:disabled{opacity:.55}
   <span class="board" id="board">No board connected</span>
   <span class="spacer"></span>
   <span id="linkState"><span class="led" id="led"></span><span id="linkText">Offline</span></span>
-  <button class="btn primary" id="connectBtn">Connect board</button>
+  <button class="btn primary" id="connectBtn">Connect USB</button>
+  <button class="btn" id="bleBtn">Connect Bluetooth</button>
 </header>
-<div class="banner" id="noSerial">This browser can't open serial ports. Open this file in Chrome or Edge on a desktop computer.</div>
+<div class="banner" id="noSerial">This browser can't talk to the board over USB or Bluetooth. Open this page in Chrome or Edge.</div>
 
 <div class="wrap">
   <aside class="side">
@@ -189,6 +190,13 @@ fieldset:disabled{opacity:.55}
         <button class="btn" id="saveBtn" type="button">Save settings to board</button>
         <button class="btn" id="clsBtn" type="button">Clear OLED</button>
       </div>
+      <label class="check"><input type="checkbox" id="bleIn"> Bluetooth console</label>
+      <p class="hint" id="bleHint">Pair from a phone with the PIN shown on the board's display.</p>
+      <form id="pinForm" class="row">
+        <div><label for="pinIn">Bluetooth PIN, 6 digits</label><input type="text" id="pinIn" inputmode="numeric" maxlength="6" autocomplete="off" placeholder="unchanged"></div>
+        <button class="btn" type="submit">Set PIN</button>
+      </form>
+      <div class="row" style="margin-top:8px"><button class="btn small" id="forgetBtn" type="button">Forget paired phones</button></div>
       <label class="check"><input type="checkbox" id="ledIn"> Blink the board LED on send, receive and heartbeat</label>
       <p class="dirty" id="dirty">Changes are active but not saved. They'll be lost when the board resets.</p>
     </section>
@@ -226,6 +234,8 @@ const store = {
 };
 
 let port = null, reader = null, writer = null, keepReading = false;
+let link = null;          // {kind:"usb"|"ble", write(text), close()}
+let bleDev = null, rxBuf = "", bleDec = new TextDecoder();
 let cfg = null, savedCfg = null, txPending = null;
 let messages = store.get("pocsag.msgs", []);
 let recentRics = store.get("pocsag.rics", []);
@@ -288,10 +298,15 @@ function fillRics(){
   for (const r of recentRics){ const o = document.createElement("option"); o.value = r; dl.appendChild(o); }
 }
 
-const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led].join("|") : "";
+const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led, c.ble].join("|") : "";
 function renderCfg(){
   if (!cfg) return;
-  $("board").textContent = cfg.board;
+  $("board").textContent = cfg.board + (cfg.ble && cfg.blename ? `, Bluetooth ${cfg.blename}` : "") +
+    (link ? (link.kind === "ble" ? " (via Bluetooth)" : " (via USB)") : "");
+  if (cfg.ble !== undefined){
+    $("bleIn").checked = !!cfg.ble;
+    $("bleHint").textContent = cfg.ble ? `Shows up as ${cfg.blename}. Pair with the PIN on the board's display.` : "Bluetooth is off.";
+  }
   $("effFreq").innerHTML = ""; $("effFreq").append(cfg.eff.toFixed(5));
   const sm = document.createElement("small"); sm.textContent = "MHz"; $("effFreq").appendChild(sm);
   $("corrText").textContent = `Correction ${cfg.corr > 0 ? "+" : ""}${cfg.corr} Hz from ${cfg.freq.toFixed(4)} MHz, ${cfg.baud} bps`;
@@ -344,13 +359,31 @@ function handleLine(line){
 }
 
 async function send(cmd){
-  if (!writer) { toast("Connect the board first", true); return; }
+  if (!link) { toast("Connect the board first", true); return; }
   logLine("> " + cmd, "out");
-  await writer.write(new TextEncoder().encode(cmd + "\n"));
+  try { await link.write(cmd + "\n"); }
+  catch(e){ logLine("Send failed: " + e.message, "e"); toast("Couldn't send to the board: " + e.message, true); }
 }
 
-/* ---------- serial ---------- */
-async function connect(){
+// text from either transport -> lines -> handleLine
+function feed(text){
+  rxBuf += text;
+  let i;
+  while ((i = rxBuf.indexOf("\n")) >= 0){
+    const line = rxBuf.slice(0, i).replace(/\r$/, ""); rxBuf = rxBuf.slice(i + 1);
+    if (line.length) handleLine(line);
+  }
+}
+
+function linkUp(kind){
+  savedCfg = null; rxBuf = "";
+  setLink("on"); $("controls").disabled = false;
+  $("connectBtn").textContent = "Disconnect"; $("connectBtn").disabled = false; $("bleBtn").hidden = true;
+  $("connectBtn").classList.add("primary");
+}
+
+/* ---------- USB (Web Serial) ---------- */
+async function connectUsb(){
   try {
     port = await navigator.serial.requestPort();
     await port.open({ baudRate: 115200 });
@@ -361,26 +394,23 @@ async function connect(){
   // CP210x auto-reset: release DTR/RTS so EN and IO0 are high and the ESP32 runs normally
   try { await port.setSignals({ dataTerminalReady:false, requestToSend:false }); } catch(e){}
   writer = port.writable.getWriter();
-  keepReading = true; savedCfg = null;
-  setLink("on"); $("controls").disabled = false; $("connectBtn").textContent = "Disconnect";
+  keepReading = true;
+  const enc = new TextEncoder();
+  link = { kind:"usb", write: t => writer.write(enc.encode(t)), close: () => {} };
+  linkUp("usb");
   readLoop();
   setTimeout(() => send("/cfg"), 1500);   // board may have just rebooted
 }
 
 async function readLoop(){
-  const dec = new TextDecoder(); let buf = "";
+  const dec = new TextDecoder();
   while (port && port.readable && keepReading){
     reader = port.readable.getReader();
     try {
       for (;;){
         const { value, done } = await reader.read();
         if (done) break;
-        buf += dec.decode(value, { stream:true });
-        let i;
-        while ((i = buf.indexOf("\n")) >= 0){
-          const line = buf.slice(0, i).replace(/\r$/, ""); buf = buf.slice(i + 1);
-          if (line.length) handleLine(line);
-        }
+        feed(dec.decode(value, { stream:true }));
       }
     } catch(e){
       logLine("Read error: " + e.message, "e");
@@ -390,21 +420,79 @@ async function readLoop(){
   if (port) await disconnect(true);
 }
 
+/* ---------- Bluetooth LE (Web Bluetooth, Nordic UART Service) ---------- */
+const NUS    = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";   // write to board
+const NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";   // notifications from board
+
+async function connectBle(){
+  try {
+    bleDev = await navigator.bluetooth.requestDevice({
+      filters: [{ services:[NUS] }, { namePrefix:"POCSAG-" }], optionalServices:[NUS] });
+  } catch(e){
+    if (e.name !== "NotFoundError") toast("Bluetooth: " + e.message, true);
+    bleDev = null; return;
+  }
+  bleDev.addEventListener("gattserverdisconnected", () => { if (link && link.kind === "ble") disconnect(true); });
+  try {
+    toast(`Connecting to ${bleDev.name || "board"}. Enter the PIN from its display if asked.`);
+    const srv = await bleDev.gatt.connect();
+    const svc = await srv.getPrimaryService(NUS);
+    const rx = await svc.getCharacteristic(NUS_RX);
+    const tx = await svc.getCharacteristic(NUS_TX);
+    tx.addEventListener("characteristicvaluechanged", e => feed(bleDec.decode(e.target.value, { stream:true })));
+    await tx.startNotifications();
+    const enc = new TextEncoder();
+    link = {
+      kind: "ble",
+      write: async t => {                                   // 20-byte chunks fit any MTU
+        const b = enc.encode(t);
+        for (let i = 0; i < b.length; i += 20) await rx.writeValueWithResponse(b.slice(i, i + 20));
+      },
+      close: () => { try { bleDev.gatt.disconnect(); } catch(e){} }
+    };
+    linkUp("ble");
+    // The board answers only after pairing. Ask for the config until it does (pairing dialog may be open).
+    let tries = 0;
+    const poll = async () => {
+      if (!link || link.kind !== "ble" || cfg) return;
+      try { await link.write("/cfg\n"); } catch(e){}
+      if (++tries < 20) setTimeout(poll, 3000);
+      else toast("No answer over Bluetooth. Check the PIN, or use Forget paired phones over USB.", true);
+    };
+    setTimeout(poll, 1000);
+  } catch(e){
+    toast("Bluetooth connection failed: " + e.message, true);
+    try { bleDev.gatt.disconnect(); } catch(_){}
+    bleDev = null;
+  }
+}
+
 async function disconnect(lost){
   keepReading = false;
+  const wasBle = link && link.kind === "ble";
+  if (link) { try { link.close(); } catch(e){} }
+  link = null;
   try { if (reader) await reader.cancel(); } catch(e){}
   try { if (writer){ writer.releaseLock(); writer = null; } } catch(e){}
   try { if (port) await port.close(); } catch(e){}
-  port = null; cfg = null;
-  setLink("off"); $("controls").disabled = true; $("connectBtn").textContent = "Connect board";
+  port = null; bleDev = null; cfg = null;
+  if (txPending){ clearTimeout(txPending.timer); txPending = null; $("txBtn").disabled = false; }
+  setLink("off"); $("controls").disabled = true;
+  $("connectBtn").textContent = "Connect USB"; $("connectBtn").disabled = !("serial" in navigator);
+  $("bleBtn").hidden = !("bluetooth" in navigator);
   $("board").textContent = "No board connected";
-  if (lost) toast("Board disconnected", true);
+  if (lost) toast(wasBle ? "Bluetooth connection lost" : "Board disconnected", true);
   renderMsgs();
 }
 
 /* ---------- wiring ---------- */
-if (!("serial" in navigator)){ $("noSerial").classList.add("show"); $("connectBtn").disabled = true; }
-$("connectBtn").onclick = () => port ? disconnect(false) : connect();
+const hasSerial = "serial" in navigator, hasBle = "bluetooth" in navigator;
+if (!hasSerial && !hasBle) $("noSerial").classList.add("show");
+$("connectBtn").disabled = !hasSerial;
+$("bleBtn").hidden = !hasBle;
+$("connectBtn").onclick = () => link ? disconnect(false) : connectUsb();
+$("bleBtn").onclick = () => connectBle();
 navigator.serial && navigator.serial.addEventListener("disconnect", e => { if (e.target === port) disconnect(true); });
 
 function updateCount(){
@@ -446,6 +534,16 @@ $("ricForm").onsubmit = e => {
 $("monIn").onchange = () => send(`/mon ${$("monIn").checked ? 1 : 0}`);
 $("pwrForm").onsubmit = e => { e.preventDefault(); const v = parseInt($("pwrIn").value, 10); if (!isNaN(v)) send(`/pwr ${v}`); };
 $("ledIn").onchange = () => send(`/led ${$("ledIn").checked ? 1 : 0}`);
+$("bleIn").onchange = () => {
+  if (!$("bleIn").checked && link && link.kind === "ble") toast("Bluetooth turned off. Reconnect over USB to turn it back on.");
+  send(`/ble ${$("bleIn").checked ? 1 : 0}`);
+};
+$("pinForm").onsubmit = e => {
+  e.preventDefault(); const v = $("pinIn").value.trim();
+  if (!/^[1-9]\d{5}$/.test(v)){ toast("The PIN needs 6 digits and can't start with 0", true); return; }
+  send(`/blepin ${v}`); $("pinIn").value = "";
+};
+$("forgetBtn").onclick = () => send("/bleforget");
 $("saveBtn").onclick = () => send("/save");
 $("clsBtn").onclick = () => send("/cls");
 $("clearMsgs").onclick = () => { messages = []; store.set("pocsag.msgs", messages); renderMsgs(); };
