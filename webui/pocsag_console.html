@@ -12,14 +12,15 @@
   --panel:#dfe2de; --panel-2:#ecefeb; --edge:#b9beb8; --ink:#22282b; --ink-2:#5b6468;
   --lcd:#a7b593; --lcd-2:#9aa986; --lcd-ink:#1d2a17; --lcd-dim:#4c5d3f;
   --tx:#d9961a; --rx:#2f9a48; --bad:#b8322a; --focus:#2b6cb0;
+  --diag:#d4d8d3;
   --font:"Barlow",system-ui,sans-serif; --cond:"Barlow Condensed","Barlow",sans-serif; --pix:"VT323",ui-monospace,monospace;
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
-  --panel:#1d2224; --panel-2:#252b2e; --edge:#3a4246; --ink:#e3e7e4; --ink-2:#9aa3a6;
+  --panel:#1d2224; --diag:#181c1e; --panel-2:#252b2e; --edge:#3a4246; --ink:#e3e7e4; --ink-2:#9aa3a6;
   --lcd:#8c9a78; --lcd-2:#7f8d6c; --lcd-ink:#141d10; --lcd-dim:#3c4a31; --focus:#7fb0ea;
 }}
 :root[data-theme="dark"]{
-  --panel:#1d2224; --panel-2:#252b2e; --edge:#3a4246; --ink:#e3e7e4; --ink-2:#9aa3a6;
+  --panel:#1d2224; --diag:#181c1e; --panel-2:#252b2e; --edge:#3a4246; --ink:#e3e7e4; --ink-2:#9aa3a6;
   --lcd:#8c9a78; --lcd-2:#7f8d6c; --lcd-ink:#141d10; --lcd-dim:#3c4a31; --focus:#7fb0ea;
 }
 *{box-sizing:border-box}
@@ -54,6 +55,7 @@ input[type=text],input[type=number],select{width:100%;padding:7px 9px;border:1px
 .row{display:flex;gap:8px;align-items:end}
 .row > *{flex:1}
 .row > .btn{flex:0 0 auto}
+.row.row-wrap{flex-wrap:wrap}
 .hint{font-size:.85rem;color:var(--ink-2);margin:6px 0 0}
 .counter{float:right;font-variant-numeric:tabular-nums}
 .counter.over{color:var(--bad)}
@@ -64,6 +66,21 @@ input[type=text],input[type=number],select{width:100%;padding:7px 9px;border:1px
 .corr{color:var(--ink-2);font-variant-numeric:tabular-nums;margin:4px 0 10px}
 .tune{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
 .tune .btn{padding:7px 0;font-variant-numeric:tabular-nums}
+/* calibration: a recessed service panel, deliberately quieter than the main controls */
+.diag{margin:18px 0 6px;border:1px dashed var(--edge);border-radius:6px;background:var(--diag);color:var(--ink-2);font-size:.92rem}
+.diag summary{cursor:pointer;padding:9px 12px;display:flex;justify-content:space-between;align-items:baseline;gap:10px;list-style:none}
+.diag summary::-webkit-details-marker{display:none}
+.diag-title{font:600 1rem/1.2 var(--cond);color:var(--ink-2);white-space:nowrap;flex:none}
+.diag-title::before{content:"\25B8";display:inline-block;width:1em;transition:transform .15s}
+.diag[open] .diag-title::before{transform:rotate(90deg)}
+.diag-sum{font-variant-numeric:tabular-nums;font-size:.85rem;text-align:right;min-width:0}
+.diag-body{padding:4px 12px 12px;border-top:1px dashed var(--edge)}
+.diag .freq{font-size:1.45rem;color:var(--ink);margin-top:8px}
+.diag .corr{margin-bottom:8px}
+.diag .btn{background:transparent;font-size:.9rem}
+.diag label{font-size:.82rem}
+.diag input[type=number]{background:transparent}
+.diag .btn.cw{border-color:var(--tx)}
 .dirty{color:var(--tx);font-size:.88rem;margin-top:8px;display:none}
 .dirty.show{display:block}
 
@@ -112,7 +129,7 @@ fieldset:disabled{opacity:.55}
   .top{padding:12px 16px}
   .msg-text{font-size:1.5rem}
 }
-@media (prefers-reduced-motion:reduce){.msg.new{animation:none}.toast{transition:none}}
+@media (prefers-reduced-motion:reduce){.msg.new{animation:none}.diag-title::before{transition:none}.toast{transition:none}}
 </style>
 </head>
 <body>
@@ -133,38 +150,18 @@ fieldset:disabled{opacity:.55}
       <h2 id="h-send">Send a page</h2>
       <form id="txForm">
         <div class="row">
-          <div><label for="txRic">RIC</label><input type="text" id="txRic" inputmode="numeric" list="ricList" autocomplete="off" required></div>
+          <div><label for="txRic">RIC</label><input type="text" id="txRic" inputmode="numeric" list="ricList" autocomplete="off" required value="555555"></div>
           <div><label for="txKind">Type</label>
             <select id="txKind"><option value="a">Text</option><option value="n">Numeric</option><option value="t">Tone only</option></select></div>
         </div>
         <datalist id="ricList"></datalist>
         <label for="txText">Message <span class="counter" id="txCount">0 / 80</span></label>
-        <input type="text" id="txText" maxlength="240" autocomplete="off" placeholder="SQ5NRY test">
-        <p class="hint" id="txHint">Include your callsign to identify the transmission.</p>
+        <input type="text" id="txText" maxlength="240" autocomplete="off" placeholder="Message text">
+        <p class="hint" id="txHint"></p>
         <div class="row" style="margin-top:12px"><button class="btn tx" id="txBtn" type="submit">Transmit</button></div>
       </form>
     </section>
 
-    <section aria-labelledby="h-freq">
-      <h2 id="h-freq">Frequency</h2>
-      <div class="freq" id="effFreq">—<small>MHz</small></div>
-      <div class="corr" id="corrText">Correction —</div>
-      <div class="tune" role="group" aria-label="Adjust correction">
-        <button class="btn" data-tune="-1000" type="button">−1 kHz</button>
-        <button class="btn" data-tune="-100" type="button">−100</button>
-        <button class="btn" data-tune="100" type="button">+100</button>
-        <button class="btn" data-tune="1000" type="button">+1 kHz</button>
-      </div>
-      <form id="corrForm" class="row" style="margin-top:10px">
-        <div><label for="corrIn">Correction, Hz</label><input type="number" id="corrIn" step="1"></div>
-        <button class="btn" type="submit">Set</button>
-      </form>
-      <form id="cwForm" class="row">
-        <div><label for="cwSecs">Carrier, seconds</label><input type="number" id="cwSecs" min="1" max="30" value="5"></div>
-        <button class="btn" type="submit" id="cwBtn">Send carrier</button>
-      </form>
-      <p class="hint" id="stepHint"></p>
-    </section>
 
     <section aria-labelledby="h-rx">
       <h2 id="h-rx">Receiver</h2>
@@ -177,16 +174,23 @@ fieldset:disabled{opacity:.55}
 
     <section aria-labelledby="h-pwr">
       <h2 id="h-pwr">Transmitter</h2>
+      <form id="callForm" class="row">
+        <div><label for="callIn">Callsign</label><input type="text" id="callIn" maxlength="10" autocomplete="off" autocapitalize="characters" spellcheck="false"></div>
+        <button class="btn" type="submit">Set</button>
+      </form>
+      <label class="check"><input type="checkbox" id="autoIdIn"> Put my callsign in front of text pages</label>
       <form id="pwrForm" class="row">
         <div><label for="pwrIn">Output power, dBm</label><input type="number" id="pwrIn"></div>
         <button class="btn" type="submit">Apply</button>
+        <button class="btn" type="button" id="pwrMax">Max</button>
       </form>
-      <p class="hint">Chip output. Modules with an external PA add their own gain.</p>
+      <p class="hint" id="pwrRange"></p>
+      <p class="hint" id="pwrNote">Chip output. Modules with an external PA add their own gain.</p>
     </section>
 
     <section aria-labelledby="h-dev">
       <h2 id="h-dev">Board</h2>
-      <div class="row">
+      <div class="row row-wrap">
         <button class="btn" id="saveBtn" type="button">Save settings to board</button>
         <button class="btn" id="clsBtn" type="button">Clear OLED</button>
       </div>
@@ -200,6 +204,31 @@ fieldset:disabled{opacity:.55}
       <label class="check"><input type="checkbox" id="ledIn"> Blink the board LED on send, receive and heartbeat</label>
       <p class="dirty" id="dirty">Changes are active but not saved. They'll be lost when the board resets.</p>
     </section>
+
+    <details class="diag" id="calib">
+      <summary><span class="diag-title">Calibration</span><span class="diag-sum" id="calSum">not connected</span></summary>
+      <div class="diag-body">
+        <p class="hint">Service tools. Send a carrier, measure it with an SDR or a frequency counter, then correct the offset.</p>
+        <div class="freq" id="effFreq">—<small>MHz</small></div>
+        <div class="corr" id="corrText">Correction —</div>
+        <div class="tune" role="group" aria-label="Adjust correction">
+          <button class="btn" data-tune="-1000" type="button">−1 kHz</button>
+          <button class="btn" data-tune="-100" type="button">−100</button>
+          <button class="btn" data-tune="100" type="button">+100</button>
+          <button class="btn" data-tune="1000" type="button">+1 kHz</button>
+        </div>
+        <form id="corrForm" class="row" style="margin-top:10px">
+          <div><label for="corrIn">Correction, Hz</label><input type="number" id="corrIn" step="1"></div>
+          <button class="btn" type="submit">Set</button>
+        </form>
+        <form id="cwForm" class="row">
+          <div><label for="cwSecs">Carrier, seconds</label><input type="number" id="cwSecs" min="1" max="30" value="5"></div>
+          <button class="btn cw" type="submit" id="cwBtn">Send carrier</button>
+        </form>
+        <p class="hint" id="stepHint"></p>
+        <p class="hint">Corrections take effect at once; use Save settings to board to keep them.</p>
+      </div>
+    </details>
     </fieldset>
   </aside>
 
@@ -298,7 +327,7 @@ function fillRics(){
   for (const r of recentRics){ const o = document.createElement("option"); o.value = r; dl.appendChild(o); }
 }
 
-const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led, c.ble].join("|") : "";
+const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led, c.ble, c.call, c.autoid].join("|") : "";
 function renderCfg(){
   if (!cfg) return;
   $("board").textContent = cfg.board + (cfg.ble && cfg.blename ? `, Bluetooth ${cfg.blename}` : "") +
@@ -310,17 +339,26 @@ function renderCfg(){
   $("effFreq").innerHTML = ""; $("effFreq").append(cfg.eff.toFixed(5));
   const sm = document.createElement("small"); sm.textContent = "MHz"; $("effFreq").appendChild(sm);
   $("corrText").textContent = `Correction ${cfg.corr > 0 ? "+" : ""}${cfg.corr} Hz from ${cfg.freq.toFixed(4)} MHz, ${cfg.baud} bps`;
+  $("calSum").textContent = `${cfg.eff.toFixed(5)} MHz, ${cfg.corr > 0 ? "+" : ""}${cfg.corr} Hz`;
   $("stepHint").textContent = `Tuning resolution on this board is about ${cfg.step} Hz.`;
   if (document.activeElement !== $("corrIn")) $("corrIn").value = cfg.corr;
   if (document.activeElement !== $("ricIn")) $("ricIn").value = cfg.ric;
   $("monIn").checked = !!cfg.mon;
   $("ledIn").checked = cfg.led !== false;
+  if (document.activeElement !== $("callIn")) $("callIn").value = cfg.call || "";
+  $("autoIdIn").checked = !!cfg.autoid;
+  updateCount();
   const p = $("pwrIn"); p.min = cfg.pmin; p.max = cfg.pmax;
   if (document.activeElement !== p) p.value = cfg.pwr;
-  if (!$("txRic").value) $("txRic").value = cfg.ric;
+  const mW = d => { const w = Math.pow(10, d / 10); return w < 10 ? w.toFixed(1) : Math.round(w); };
+  $("pwrRange").textContent = `This board: ${cfg.pmin} to ${cfg.pmax} dBm. Now ${cfg.pwr} dBm, about ${mW(cfg.pwr)} mW; maximum about ${mW(cfg.pmax)} mW.`;
+  if (cfg.pnote) $("pwrNote").textContent = cfg.pnote;
+  $("pwrMax").disabled = cfg.pwr >= cfg.pmax;
   $("pagerRic").textContent = cfg.mon ? "ALL RICS" : "RIC " + cfg.ric;
   if (savedCfg === null) savedCfg = cfgKey(cfg);          // state at boot = what's in flash
-  $("dirty").classList.toggle("show", cfgKey(cfg) !== savedCfg);
+  const dirty = cfgKey(cfg) !== savedCfg;
+  $("dirty").classList.toggle("show", dirty);
+  $("saveBtn").classList.toggle("tx", dirty);          // same amber as Transmit: "press me"
   if (!messages.length) renderMsgs();
 }
 
@@ -482,6 +520,8 @@ async function disconnect(lost){
   $("connectBtn").textContent = "Connect USB"; $("connectBtn").disabled = !("serial" in navigator);
   $("bleBtn").hidden = !("bluetooth" in navigator);
   $("board").textContent = "No board connected";
+  $("calSum").textContent = "not connected";
+  $("saveBtn").classList.remove("tx");
   if (lost) toast(wasBle ? "Bluetooth connection lost" : "Board disconnected", true);
   renderMsgs();
 }
@@ -498,9 +538,20 @@ navigator.serial && navigator.serial.addEventListener("disconnect", e => { if (e
 function updateCount(){
   const kind = $("txKind").value, n = $("txText").value.length;
   $("txText").disabled = kind === "t";
-  $("txText").placeholder = kind === "n" ? "0-9  *  U  -  ( )  space" : kind === "t" ? "Tone pages carry no text" : "SQ5NRY test";
-  const c = $("txCount"); c.textContent = `${n} / 80`; c.classList.toggle("over", n > 80);
-  $("txHint").textContent = n > 80 ? "Many pagers show only the first 80 characters." : "Include your callsign to identify the transmission.";
+  const call = cfg && cfg.call ? cfg.call : "";
+  const autoId = !!(cfg && cfg.autoid && call);
+  $("txText").placeholder = kind === "n" ? "0-9  *  U  -  ( )  space" : kind === "t" ? "Tone pages carry no text" : "Message text";
+  // what will actually go out for text pages, counting the callsign the board adds
+  const sent = kind === "a" && autoId && !$("txText").value.toUpperCase().includes(call) ? call.length + 1 + n : n;
+  const c = $("txCount"); c.textContent = `${sent} / 80`; c.classList.toggle("over", sent > 80);
+  let hint;
+  if (call === "XX9YYY" && kind === "a") hint = "XX9YYY is a placeholder. Set your own callsign under Transmitter.";
+  else if (sent > 80) hint = "Many pagers show only the first 80 characters.";
+  else if (kind !== "a") hint = call ? `Numeric and tone pages can't carry ${call}; identify the station another way.` : "";
+  else if (autoId) hint = `Sent as "${call} ${$("txText").value || "…"}".`;
+  else if (call) hint = `Include ${call} to identify the transmission.`;
+  else hint = "Set your callsign under Transmitter to identify your transmissions.";
+  $("txHint").textContent = hint;
 }
 $("txText").oninput = updateCount; $("txKind").onchange = updateCount;
 
@@ -543,12 +594,21 @@ $("pinForm").onsubmit = e => {
   if (!/^[1-9]\d{5}$/.test(v)){ toast("The PIN needs 6 digits and can't start with 0", true); return; }
   send(`/blepin ${v}`); $("pinIn").value = "";
 };
+$("callForm").onsubmit = e => {
+  e.preventDefault(); const v = $("callIn").value.trim().toUpperCase();
+  if (v && !/^[A-Z0-9\/]{3,10}$/.test(v)){ toast("Callsign: 3 to 10 letters, digits or /", true); return; }
+  send(`/call ${v || "-"}`);
+};
+$("autoIdIn").onchange = () => send(`/autoid ${$("autoIdIn").checked ? 1 : 0}`);
 $("forgetBtn").onclick = () => send("/bleforget");
+$("pwrMax").onclick = () => { if (cfg) send(`/pwr ${cfg.pmax}`); };
 $("saveBtn").onclick = () => send("/save");
 $("clsBtn").onclick = () => send("/cls");
 $("clearMsgs").onclick = () => { messages = []; store.set("pocsag.msgs", messages); renderMsgs(); };
 $("rawForm").onsubmit = e => { e.preventDefault(); const v = $("rawIn").value.trim(); if (v){ send(v); $("rawIn").value = ""; } };
 
+$("calib").open = store.get("pocsag.calibOpen", false);
+$("calib").addEventListener("toggle", () => store.set("pocsag.calibOpen", $("calib").open));
 fillRics(); updateCount(); renderMsgs(); setLink("off");
 </script>
 </body>
