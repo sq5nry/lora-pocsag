@@ -34,6 +34,7 @@ static const bool     DEFAULT_LED     = true;
 static const bool     DEFAULT_BLE     = true;
 static const char*    DEFAULT_CALL    = "XX9YYY";   // placeholder until set with /call
 static const uint8_t  DEFAULT_TXMAX   = 10;         // s, transmit time limit
+static const uint32_t DEFAULT_DEST    = 555555;     // destination RIC offered in the web console
 static const uint8_t  TXMAX_MIN = 2, TXMAX_MAX = 60;
 
 // ---------------- runtime settings ----------------
@@ -48,6 +49,7 @@ static char     callsign[12] = "XX9YYY";
 static bool     autoId     = true;
 static float    rxBw       = BW_DEFAULT;
 static uint8_t  txMax      = DEFAULT_TXMAX;
+static uint32_t lastDest   = DEFAULT_DEST;          // last RIC a page was sent to, kept by /save
 
 static Preferences prefs;
 static PocsagRadio radio;
@@ -150,12 +152,13 @@ static void emitCfg() {
     "{\"board\":\"%s\",\"freq\":%.4f,\"corr\":%ld,\"eff\":%.5f,\"baud\":%u,\"inv\":%s,"
     "\"ric\":%lu,\"mon\":%s,\"pwr\":%d,\"pmin\":%d,\"pmax\":%d,\"step\":%d,\"led\":%s,"
     "\"ble\":%s,\"blename\":\"%s\",\"call\":\"%s\",\"autoid\":%s,\"pnote\":\"%s\","
-    "\"bw\":%.1f,\"bwss\":%s,\"txmax\":%u,\"txmin\":%u,\"txmaxmax\":%u,\"logn\":%u,\"bws\":",
+    "\"bw\":%.1f,\"bwss\":%s,\"txmax\":%u,\"txmin\":%u,\"txmaxmax\":%u,\"logn\":%u,\"dest\":%lu,\"bws\":",
     BOARD_NAME, FREQ_MHZ, (long)corrHz, curFreq(), POCSAG_BAUD, POCSAG_INVERT ? "true" : "false",
     (unsigned long)myRic, monAll ? "true" : "false", txPwr, PWR_MIN, PWR_MAX, FREQ_STEP_HZ,
     ledEnabled ? "true" : "false", bleEnabled ? "true" : "false", ble.name().c_str(),
     callsign, autoId ? "true" : "false", PWR_NOTE,
-    rxBw, BW_SINGLE_SIDED ? "true" : "false", txMax, TXMAX_MIN, TXMAX_MAX, MsgLog::LOG_N);
+    rxBw, BW_SINGLE_SIDED ? "true" : "false", txMax, TXMAX_MIN, TXMAX_MAX, MsgLog::LOG_N,
+    (unsigned long)lastDest);
   emitEvt("CFG", String(b) + bws + "}");
 }
 
@@ -197,6 +200,7 @@ static void txWatchFire() { radio.abortTx(); }    // timer context: only sets a 
 // kind: 'a' alphanumeric, 'n' numeric, 't' tone only
 static void doTx(uint32_t ric, char kind, String text) {   // by value: RadioLib wants String&
   if (ric == 0 || ric > 2097151UL) { emitMsg("ERR", "RIC out of range (1..2097151)"); return; }
+  lastDest = ric;
   if (kind == 'a' && autoId && callsign[0]) {               // identify the station
     String up = text; up.toUpperCase();
     if (up.indexOf(callsign) < 0) text = String(callsign) + " " + text;
@@ -431,6 +435,7 @@ static void handleCommand(String cmd) {
     prefs.putBool("autoid", autoId);
     prefs.putFloat("bw", rxBw);
     prefs.putUChar("txmax", txMax);
+    prefs.putUInt("dest", lastDest);
     logf("saved\n");
     emitMsg("OK", "settings saved");
   }
@@ -509,6 +514,7 @@ void setup() {
   prefs.getString("call", callsign, sizeof(callsign));
   autoId     = prefs.getBool("autoid", true);
   rxBw       = bwNearest(prefs.getFloat("bw", BW_DEFAULT));
+  lastDest   = prefs.getUInt("dest", DEFAULT_DEST);
   txMax      = (uint8_t)constrain((int)prefs.getUChar("txmax", DEFAULT_TXMAX), TXMAX_MIN, TXMAX_MAX);
 
   msgLog.begin();

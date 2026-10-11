@@ -103,9 +103,7 @@ input[type=text],input[type=number],select{width:100%;padding:7px 9px;border:1px
 .msg-meta{font:1.2rem/1.1 var(--pix);color:var(--lcd-dim);display:flex;gap:14px;flex-wrap:wrap}
 .msg-meta .dir{color:var(--lcd-ink)}
 .msg-text{font:1.75rem/1.15 var(--pix);word-break:break-word;white-space:pre-wrap;margin-top:2px}
-/* sent pages: right-aligned like the outgoing side of a chat, SENT in reverse video */
-.msg.out{text-align:right;padding-left:18%}
-.msg.out .msg-meta{justify-content:flex-end}
+/* sent pages: same layout as received, SENT tag in reverse video, slightly dimmer text */
 /* direction tag: outlined box for received, filled box for sent; same size */
 .msg-meta .dir{border:1px solid var(--lcd-ink);padding:0 5px}
 .msg.out .msg-meta .dir{background:var(--lcd-ink);color:var(--lcd)}
@@ -382,7 +380,7 @@ function fillRics(){
   for (const r of recentRics){ const o = document.createElement("option"); o.value = r; dl.appendChild(o); }
 }
 
-const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led, c.ble, c.call, c.autoid, c.bw, c.txmax].join("|") : "";
+const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led, c.ble, c.call, c.autoid, c.bw, c.txmax, c.dest].join("|") : "";
 function renderCfg(){
   if (!cfg) return;
   $("board").textContent = cfg.board + (cfg.ble && cfg.blename ? `, Bluetooth ${cfg.blename}` : "") +
@@ -475,7 +473,10 @@ function handleLine(line){
   switch (type){
     case "CFG":
       cfg = d; renderCfg();
-      if (link && !logRequested){ logRequested = true; logNew = 0; send("/log"); }
+      if (link && !logRequested){
+        logRequested = true; logNew = 0; send("/log");
+        if (d.dest && document.activeElement !== $("txRic")) { $("txRic").value = d.dest; updateCount(); }
+      }
       break;
     case "RX": {
       const key = d.id != null ? `${(cfg && (cfg.blename || cfg.board)) || "board"}#${d.id}` : null;
@@ -524,10 +525,10 @@ function handleLine(line){
     case "TX":
       if (txPending){ clearTimeout(txPending.timer); txPending = null; }
       setLink("on"); $("txBtn").disabled = false;
+      if (cfg && d.ric) { cfg.dest = d.ric; renderCfg(); }   // board remembers it until /save
       addMsg({dir:"tx", ric:d.ric, kind:d.kind, text:d.text, air:d.airtime,
               err: d.ok ? "" : (d.code === -5 ? "stopped by time limit" : "failed, code " + d.code)});
       d.ok ? toast(`Sent to RIC ${d.ric}`) : toast(`Transmit failed (code ${d.code})`, true);
-      if (d.ok && d.kind === "t") pagerBeep();       // tone page went out
       break;
     case "CW":
       setLink(d.on ? "tx" : "on"); $("cwBtn").disabled = !!d.on;
