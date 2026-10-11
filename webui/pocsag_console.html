@@ -175,6 +175,7 @@ fieldset:disabled{opacity:.55}
         <button class="btn" type="submit">Apply</button>
       </form>
       <label class="check"><input type="checkbox" id="monIn"> Show pages for every RIC</label>
+      <label class="check"><input type="checkbox" id="beepIn"> Beep in this browser for tone pages</label>
       <label for="bwIn">Receive filter width</label>
       <select id="bwIn"></select>
       <p class="hint" id="bwHint">Narrower filters hear weaker pages, but the frequency has to be calibrated. The signal itself is about 12 kHz wide.</p>
@@ -412,6 +413,35 @@ function renderCfg(){
   if (!messages.length) renderMsgs();
 }
 
+/* ---------- beep (Web Audio) ---------- */
+// Browsers only allow sound after a click on the page, so the audio context is
+// created/resumed on the first user interaction and reused afterwards.
+let audioCtx = null;
+function unlockAudio(){
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch(e){}
+}
+document.addEventListener("pointerdown", unlockAudio, { capture:true });
+document.addEventListener("keydown", unlockAudio, { capture:true });
+// pager-style alert: three short 2.7 kHz beeps
+function pagerBeep(){
+  if (!$("beepIn").checked || !audioCtx) return;
+  const t0 = audioCtx.currentTime + 0.02;
+  for (let i = 0; i < 3; i++){
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = "square"; o.frequency.value = 2700;
+    const t = t0 + i * 0.22;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.12, t + 0.005);
+    g.gain.setValueAtTime(0.12, t + 0.12);
+    g.gain.linearRampToValueAtTime(0, t + 0.13);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(t); o.stop(t + 0.14);
+  }
+}
+
 /* ---------- protocol ---------- */
 function handleLine(line){
   if (!line.startsWith("@")){ logLine(line); return; }
@@ -432,6 +462,7 @@ function handleLine(line){
       const ts = d.age == null ? null : Date.now() - d.age * 1000;
       addMsg({dir:"rx", key, ric:d.ric, func:d.func, text:d.text, rssi:d.rssi, fixes:d.fixes, err}, ts, !!d.replay);
       if (d.replay) logNew++;
+      else if (!d.text) pagerBeep();                 // tone-only page received
       break;
     }
     case "LOGEND":
@@ -451,6 +482,7 @@ function handleLine(line){
       addMsg({dir:"tx", ric:d.ric, kind:d.kind, text:d.text, air:d.airtime,
               err: d.ok ? "" : (d.code === -5 ? "stopped by time limit" : "failed, code " + d.code)});
       d.ok ? toast(`Sent to RIC ${d.ric}`) : toast(`Transmit failed (code ${d.code})`, true);
+      if (d.ok && d.kind === "t") pagerBeep();       // tone page went out
       break;
     case "CW":
       setLink(d.on ? "tx" : "on"); $("cwBtn").disabled = !!d.on;
@@ -707,6 +739,8 @@ $("clearMsgs").onclick = () => { messages = []; store.set("pocsag.msgs", message
 $("rawForm").onsubmit = e => { e.preventDefault(); const v = $("rawIn").value.trim(); if (v){ send(v); $("rawIn").value = ""; } };
 
 $("calib").open = store.get("pocsag.calibOpen", false);
+$("beepIn").checked = store.get("pocsag.beep", true);
+$("beepIn").onchange = () => { store.set("pocsag.beep", $("beepIn").checked); if ($("beepIn").checked){ unlockAudio(); pagerBeep(); } };
 $("calib").addEventListener("toggle", () => store.set("pocsag.calibOpen", $("calib").open));
 fillRics(); updateCount(); renderMsgs(); setLink("off");
 </script>
