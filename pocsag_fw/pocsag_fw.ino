@@ -11,7 +11,7 @@
   or the web console (webui/pocsag_console.html). Type /help for commands.
   Lines starting with '@' are JSON events for the web console:
     @CFG config   @RX received page   @TX transmit result   @CW carrier on/off
-    @RSSI live signal level   @LOGEND end of /log replay   @OK / @ERR
+    @RSSI live signal level   @LOGEND end of /log replay   @CAL board-to-board tuning   @OK / @ERR
 */
 
 #include <Wire.h>
@@ -235,6 +235,79 @@ static void serviceRssi() {
   emitEvt("RSSI", "{\"dbm\":" + String(radio.rssiNow(), 1) + "}");
 }
 
+// ---------------- board-to-board frequency alignment ----------------
+// Base board: /calbeacon sends short LoRa packets on the channel.
+// Board to tune: /calsync listens in LoRa mode; the chip reports each packet's frequency error,
+// the correction is moved and the error measured again, learning the chip's sign and scale
+// from the first step (secant method), until the boards agree within ~120 Hz.
+static void emitCal(const String& json) { emitEvt("CAL", json); }
+
+static void calBeacon(long count) {
+  count = constrain(count, 5L, 60L);
+  logf("CAL beacon x%ld\n", count);
+  emitCal("{\"role\":\"beacon\",\"state\":\"start\",\"count\":" + String(count) + "}");
+  ledBusy();
+  int16_t st = radio.calEnter(curFreq());
+  if (!st) st = radio.calBeacon(callsign, (uint8_t)count);
+  int16_t st2 = radio.calExit(curFreq());
+  ledIdle();
+  warnIf(st, "calibration beacon");
+  warnIf(st2, "restart receiver");
+  emitCal("{\"role\":\"beacon\",\"state\":\"done\",\"ok\":" + String(st == 0 ? "true" : "false") + "}");
+  logf("CAL beacon end\n");
+}
+
+static void calSync(long waitSec) {
+  waitSec = constrain(waitSec, 5L, 120L);
+  const int32_t startCorr = corrHz;
+  logf("CAL sync, waiting\n");
+  emitCal("{\"role\":\"sync\",\"state\":\"listen\",\"wait\":" + String(waitSec) + "}");
+  ledBusy();
+  int16_t st = radio.calEnter(curFreq());
+  // Secant method: start by assuming "measured error = Hz to move", then learn the real
+  // ratio (sign and scale) from how the error changed after each step. Converges in 2-5
+  // rounds even if the chip reports the error with the opposite sign or a wrong scale.
+  float err = 0, gain = 1.0f, prevErr = 0, prevStep = 0;
+  bool havePrev = false;
+  uint8_t got = 0;
+  bool done = false, heard = false;
+  for (uint8_t round = 0; !st && round < 6; round++) {
+    st = radio.calMeasure(curFreq(), 4, round == 0 ? waitSec * 1000UL : 3000UL, 1500UL, err, got);
+    if (st || !got) break;
+    heard = true;
+    emitCal("{\"role\":\"sync\",\"state\":\"round\",\"round\":" + String(round + 1) +
+            ",\"err\":" + String(err, 0) + ",\"n\":" + String(got) + ",\"corr\":" + String(corrHz) + "}");
+    if (fabsf(err) < 120.0f) { done = true; break; }        // aligned within ~2 synth steps
+    if (havePrev && fabsf(prevStep) > 50.0f) {
+      float g = (prevErr - err) / prevStep;                 // change of measured error per Hz moved
+      if (fabsf(g) > 0.2f && fabsf(g) < 5.0f) gain = g;
+    }
+    float step = constrain(err / gain, -40000.0f, 40000.0f);
+    int32_t before = corrHz;
+    corrHz += (int32_t)lroundf(step);
+    prevStep = (float)(corrHz - before);
+    prevErr = err; havePrev = true;
+  }
+  int16_t st2 = radio.calExit(curFreq());
+  ledIdle();
+  warnIf(st, "calibration receive");
+  warnIf(st2, "restart receiver");
+  if (!heard) {
+    corrHz = startCorr;
+    emitCal("{\"role\":\"sync\",\"state\":\"done\",\"ok\":false,\"msg\":\"no calibration signal heard\"}");
+    logf("CAL: nothing heard\n");
+    return;
+  }
+  String j = "{\"role\":\"sync\",\"state\":\"done\",\"ok\":" + String(done ? "true" : "false") +
+             ",\"corr\":" + String(corrHz) + ",\"change\":" + String(corrHz - startCorr) +
+             ",\"residual\":" + String(err, 0);
+  if (!done) j += ",\"msg\":\"signal lost before the error was below 120 Hz\"";
+  j += "}";
+  emitCal(j);
+  logf("CAL %+ld Hz\nres %.0f Hz\n", (long)(corrHz - startCorr), err);
+  emitCfg();
+}
+
 // ---------------- commands ----------------
 static bool splitRicText(const String& s, uint32_t& ric, String& text) {
   int sep = s.indexOf(':');
@@ -256,6 +329,8 @@ static void help() {
     "  /c Hz           set absolute correction, e.g. /c -1250\n"
     "  /cw [s]         unmodulated carrier for measuring (default 5 s, capped by /txmax)\n"
     "  /bw kHz         receive filter bandwidth (chip units, see /cfg bws)\n"
+    "  /calbeacon [n]  send n calibration packets (base board, default 40, ~6 s)\n"
+    "  /calsync [s]    tune to a base board's /calbeacon, wait up to s seconds (default 30)\n"
     "  /rssi 0|1       stream live signal level for 2 minutes\n"
     "  /ric N          own RIC (receive filter)\n"
     "  /mon 0|1        1 = show pages for every RIC\n"
@@ -376,6 +451,8 @@ static void handleCommand(String cmd) {
     logf("CW end\n");
     emitEvt("CW", "{\"on\":false}");
   }
+  else if (cmd == "/calbeacon") { calBeacon(arg.length() ? n : 40); }
+  else if (cmd == "/calsync")   { calSync(arg.length() ? n : 30); }
   else if (cmd == "/led") {
     ledEnabled = (n != 0);
     if (ledEnabled) ledBlink(2, 200); else ledIdle();

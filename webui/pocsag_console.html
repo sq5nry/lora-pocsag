@@ -68,6 +68,7 @@ input[type=text],input[type=number],select{width:100%;padding:7px 9px;border:1px
 .tune .btn{padding:7px 0;font-variant-numeric:tabular-nums}
 /* calibration: a recessed service panel, deliberately quieter than the main controls */
 .diag{margin:18px 0 6px;border:1px dashed var(--edge);border-radius:6px;background:var(--diag);color:var(--ink-2);font-size:.92rem}
+.diag + .diag{margin-top:8px}
 .diag summary{cursor:pointer;padding:9px 12px;display:flex;justify-content:space-between;align-items:baseline;gap:10px;list-style:none}
 .diag summary::-webkit-details-marker{display:none}
 .diag-title{font:600 1rem/1.2 var(--cond);color:var(--ink-2);white-space:nowrap;flex:none}
@@ -81,6 +82,7 @@ input[type=text],input[type=number],select{width:100%;padding:7px 9px;border:1px
 .diag label{font-size:.82rem}
 .diag input[type=number]{background:transparent}
 .diag .btn.cw{border-color:var(--tx)}
+.diag-sub{font:600 .95rem/1.2 var(--cond);color:var(--ink-2);margin:14px 0 2px}
 .meter-row{display:flex;align-items:center;gap:10px;margin-top:12px}
 .meter-val{font-variant-numeric:tabular-nums;color:var(--ink)}
 .meter{height:10px;border:1px solid var(--edge);border-radius:3px;overflow:hidden;margin-top:8px}
@@ -101,7 +103,13 @@ input[type=text],input[type=number],select{width:100%;padding:7px 9px;border:1px
 .msg-meta{font:1.2rem/1.1 var(--pix);color:var(--lcd-dim);display:flex;gap:14px;flex-wrap:wrap}
 .msg-meta .dir{color:var(--lcd-ink)}
 .msg-text{font:1.75rem/1.15 var(--pix);word-break:break-word;white-space:pre-wrap;margin-top:2px}
-.msg.out .msg-text{opacity:.78}
+/* sent pages: right-aligned like the outgoing side of a chat, SENT in reverse video */
+.msg.out{text-align:right;padding-left:18%}
+.msg.out .msg-meta{justify-content:flex-end}
+/* direction tag: outlined box for received, filled box for sent; same size */
+.msg-meta .dir{border:1px solid var(--lcd-ink);padding:0 5px}
+.msg.out .msg-meta .dir{background:var(--lcd-ink);color:var(--lcd)}
+.msg.out .msg-text{color:var(--lcd-dim)}
 .msg.err .msg-meta .flag{color:var(--bad)}
 .empty{font:1.5rem/1.3 var(--pix);color:var(--lcd-dim);padding:28px 0}
 .msg.new{animation:blink .5s steps(1) 3}
@@ -208,49 +216,62 @@ fieldset:disabled{opacity:.55}
         <button class="btn" id="saveBtn" type="button">Save settings to board</button>
         <button class="btn" id="clsBtn" type="button">Clear OLED</button>
       </div>
-      <label class="check"><input type="checkbox" id="bleIn"> Bluetooth console</label>
-      <p class="hint" id="bleHint">Pair from a phone with the PIN shown on the board's display.</p>
-      <form id="pinForm" class="row">
-        <div><label for="pinIn">Bluetooth PIN, 6 digits</label><input type="text" id="pinIn" inputmode="numeric" maxlength="6" autocomplete="off" placeholder="unchanged"></div>
-        <button class="btn" type="submit">Set PIN</button>
-      </form>
       <div class="row row-wrap" style="margin-top:8px">
-        <button class="btn small" id="forgetBtn" type="button">Forget paired phones</button>
         <button class="btn small" id="logClearBtn" type="button">Clear pages stored on board</button>
       </div>
       <label class="check"><input type="checkbox" id="ledIn"> Blink the board LED on send, receive and heartbeat</label>
       <p class="dirty" id="dirty">Changes are active but not saved. They'll be lost when the board resets.</p>
+      <details class="diag" id="bleBox">
+        <summary><span class="diag-title">Bluetooth</span><span class="diag-sum" id="bleSum">not connected</span></summary>
+        <div class="diag-body">
+          <label class="check"><input type="checkbox" id="bleIn"> Bluetooth console</label>
+          <p class="hint" id="bleHint">Pair from a phone with the PIN shown on the board's display.</p>
+          <form id="pinForm" class="row">
+            <div><label for="pinIn">Bluetooth PIN, 6 digits</label><input type="text" id="pinIn" inputmode="numeric" maxlength="6" autocomplete="off" placeholder="unchanged"></div>
+            <button class="btn" type="submit">Set PIN</button>
+          </form>
+          <div class="row" style="margin-top:8px"><button class="btn small" id="forgetBtn" type="button">Forget paired phones</button></div>
+        </div>
+      </details>
+
+      <details class="diag" id="calib">
+        <summary><span class="diag-title">Calibration</span><span class="diag-sum" id="calSum">not connected</span></summary>
+        <div class="diag-body">
+          <p class="hint">Service tools. Send a carrier, measure it with an SDR or a frequency counter, then correct the offset.</p>
+          <div class="freq" id="effFreq">—<small>MHz</small></div>
+          <div class="corr" id="corrText">Correction —</div>
+          <div class="tune" role="group" aria-label="Adjust correction">
+            <button class="btn" data-tune="-1000" type="button">−1 kHz</button>
+            <button class="btn" data-tune="-100" type="button">−100</button>
+            <button class="btn" data-tune="100" type="button">+100</button>
+            <button class="btn" data-tune="1000" type="button">+1 kHz</button>
+          </div>
+          <form id="corrForm" class="row" style="margin-top:10px">
+            <div><label for="corrIn">Correction, Hz</label><input type="number" id="corrIn" step="1"></div>
+            <button class="btn" type="submit">Set</button>
+          </form>
+          <form id="cwForm" class="row">
+            <div><label for="cwSecs">Carrier, seconds</label><input type="number" id="cwSecs" min="1" max="30" value="5"></div>
+            <button class="btn cw" type="submit" id="cwBtn">Send carrier</button>
+          </form>
+          <h3 class="diag-sub">Match another board</h3>
+          <p class="hint">Press <b>Tune to another board</b> here first, then <b>Send calibration signal</b> on the reference board within 30 s. Same channel, a few metres apart.</p>
+          <div class="row row-wrap">
+            <button class="btn" type="button" id="calSyncBtn">Tune to another board</button>
+            <button class="btn cw" type="button" id="calBeaconBtn">Send calibration signal</button>
+          </div>
+          <p class="hint" id="calStatus" aria-live="polite"></p>
+          <div class="meter-row">
+            <button class="btn" type="button" id="rssiBtn">Show live signal</button>
+            <span class="meter-val" id="rssiVal"></span>
+          </div>
+          <div class="meter" aria-hidden="true"><div class="meter-fill" id="rssiBar"></div></div>
+          <p class="hint" id="stepHint"></p>
+          <p class="hint">Corrections take effect at once; use Save settings to board to keep them.</p>
+        </div>
+      </details>
     </section>
 
-    <details class="diag" id="calib">
-      <summary><span class="diag-title">Calibration</span><span class="diag-sum" id="calSum">not connected</span></summary>
-      <div class="diag-body">
-        <p class="hint">Service tools. Send a carrier, measure it with an SDR or a frequency counter, then correct the offset.</p>
-        <div class="freq" id="effFreq">—<small>MHz</small></div>
-        <div class="corr" id="corrText">Correction —</div>
-        <div class="tune" role="group" aria-label="Adjust correction">
-          <button class="btn" data-tune="-1000" type="button">−1 kHz</button>
-          <button class="btn" data-tune="-100" type="button">−100</button>
-          <button class="btn" data-tune="100" type="button">+100</button>
-          <button class="btn" data-tune="1000" type="button">+1 kHz</button>
-        </div>
-        <form id="corrForm" class="row" style="margin-top:10px">
-          <div><label for="corrIn">Correction, Hz</label><input type="number" id="corrIn" step="1"></div>
-          <button class="btn" type="submit">Set</button>
-        </form>
-        <form id="cwForm" class="row">
-          <div><label for="cwSecs">Carrier, seconds</label><input type="number" id="cwSecs" min="1" max="30" value="5"></div>
-          <button class="btn cw" type="submit" id="cwBtn">Send carrier</button>
-        </form>
-        <div class="meter-row">
-          <button class="btn" type="button" id="rssiBtn">Show live signal</button>
-          <span class="meter-val" id="rssiVal"></span>
-        </div>
-        <div class="meter" aria-hidden="true"><div class="meter-fill" id="rssiBar"></div></div>
-        <p class="hint" id="stepHint"></p>
-        <p class="hint">Corrections take effect at once; use Save settings to board to keep them.</p>
-      </div>
-    </details>
     </fieldset>
   </aside>
 
@@ -366,6 +387,7 @@ function renderCfg(){
   if (!cfg) return;
   $("board").textContent = cfg.board + (cfg.ble && cfg.blename ? `, Bluetooth ${cfg.blename}` : "") +
     (link ? (link.kind === "ble" ? " (via Bluetooth)" : " (via USB)") : "");
+  if (cfg.ble !== undefined) $("bleSum").textContent = cfg.ble ? `on, ${cfg.blename}` : "off";
   if (cfg.ble !== undefined){
     $("bleIn").checked = !!cfg.ble;
     $("bleHint").textContent = cfg.ble ? `Shows up as ${cfg.blename}. Pair with the PIN on the board's display.` : "Bluetooth is off.";
@@ -468,6 +490,29 @@ function handleLine(line){
     case "LOGEND":
       if (logNew) toast(`Loaded ${logNew} page${logNew > 1 ? "s" : ""} stored on the board`);
       logNew = 0; break;
+    case "CAL": {
+      const busy = d.state === "start" || d.state === "listen" || d.state === "round";
+      $("calSyncBtn").disabled = busy; $("calBeaconBtn").disabled = busy;
+      const st = $("calStatus");
+      if (d.role === "beacon"){
+        setLink(d.state === "start" ? "tx" : "on");
+        st.textContent = d.state === "start" ? `Sending ${d.count} calibration packets…` : (d.ok ? "Calibration signal sent." : "Sending the calibration signal failed.");
+      } else if (d.state === "listen"){
+        st.textContent = `Listening for a calibration signal for up to ${d.wait} s. Start it on the reference board now.`;
+      } else if (d.state === "round"){
+        st.textContent = `Round ${d.round}: ${d.err > 0 ? "+" : ""}${d.err} Hz off, measured on ${d.n} packet${d.n > 1 ? "s" : ""}…`;
+      } else if (d.state === "done"){
+        if (d.ok){
+          st.textContent = `Matched: moved ${d.change > 0 ? "+" : ""}${d.change} Hz, ${Math.abs(d.residual)} Hz left. Save settings to keep it.`;
+          toast("Frequency matched to the other board");
+        } else {
+          st.textContent = (d.msg ? d.msg.charAt(0).toUpperCase() + d.msg.slice(1) : "Tuning failed") +
+            (d.change ? `. Moved ${d.change > 0 ? "+" : ""}${d.change} Hz so far.` : ".");
+          toast(st.textContent, true);
+        }
+      }
+      break;
+    }
     case "RSSI":
       if (d.on === false){ rssiSet(false, true); break; }
       if (typeof d.dbm === "number"){
@@ -622,6 +667,7 @@ async function disconnect(lost){
   $("bleBtn").hidden = !("bluetooth" in navigator);
   $("board").textContent = "No board connected";
   $("calSum").textContent = "not connected";
+  $("bleSum").textContent = "not connected";
   rssiSet(false, true);
   $("saveBtn").classList.remove("tx");
   if (lost) toast(wasBle ? "Bluetooth connection lost" : "Board disconnected", true);
@@ -727,6 +773,8 @@ function rssiSet(on, silent){
   send(`/rssi ${on ? 1 : 0}`);
   if (on) rssiKeep = setInterval(() => send("/rssi 1"), 60000);   // board stops after 2 min on its own
 }
+$("calSyncBtn").onclick = () => { $("calStatus").textContent = ""; send("/calsync 30"); };
+$("calBeaconBtn").onclick = () => { $("calStatus").textContent = ""; send("/calbeacon 40"); };
 $("rssiBtn").onclick = () => rssiSet(!rssiOn);
 $("calib").addEventListener("toggle", () => { if (!$("calib").open && rssiOn) rssiSet(false); });
 $("bwIn").onchange = () => send(`/bw ${$("bwIn").value}`);
@@ -739,6 +787,8 @@ $("clearMsgs").onclick = () => { messages = []; store.set("pocsag.msgs", message
 $("rawForm").onsubmit = e => { e.preventDefault(); const v = $("rawIn").value.trim(); if (v){ send(v); $("rawIn").value = ""; } };
 
 $("calib").open = store.get("pocsag.calibOpen", false);
+$("bleBox").open = store.get("pocsag.bleOpen", false);
+$("bleBox").addEventListener("toggle", () => store.set("pocsag.bleOpen", $("bleBox").open));
 $("beepIn").checked = store.get("pocsag.beep", true);
 $("beepIn").onchange = () => { store.set("pocsag.beep", $("beepIn").checked); if ($("beepIn").checked){ unlockAudio(); pagerBeep(); } };
 $("calib").addEventListener("toggle", () => store.set("pocsag.calibOpen", $("calib").open));

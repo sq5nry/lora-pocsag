@@ -30,4 +30,13 @@ After the first start, set your callsign and RIC (web console, or serial at 1152
 Type `/help` for all commands: frequency correction and carrier for calibration, receive filter
 width, transmit power and time limit, monitor mode for all RICs, stored pages, Bluetooth.
 
+### Matching the frequency of two boards
+
+Crystal boards (like the T3) can be several kHz off, while POCSAG between two boards stops
+working at roughly 3 kHz of difference. To align a board to a reference (ideally the Heltec,
+which has a TCXO): on the board to tune run `/calsync` (or *Tune to another board* in the web
+console's Calibration panel), then on the reference run `/calbeacon` (*Send calibration signal*).
+The boards briefly switch to LoRa, whose receiver measures the frequency error of each packet;
+the tuned board corrects itself in a few rounds to within about 100 Hz. Save with `/save`.
+
 The Heltec V3 must be the 433/470–510 MHz variant; the 868/915 MHz board is matched for that band.

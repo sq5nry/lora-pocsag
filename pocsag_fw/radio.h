@@ -60,7 +60,7 @@ class PocsagRadio {
                                              int16_t s = pager_.begin(freq_, POCSAG_BAUD, POCSAG_INVERT, POCSAG_SHIFT);
                                              return s ? s : startRx(); }
   int16_t setFilter(uint32_t ric, uint32_t mask) { ric_ = ric; mask_ = mask; return restartRx(); }
-  int16_t setPower(int8_t pwr)             { chip_.standby(); int16_t s = chip_.setOutputPower(pwr);
+  int16_t setPower(int8_t pwr)             { pwr_ = pwr; chip_.standby(); int16_t s = chip_.setOutputPower(pwr);
                                              int16_t r = startRx(); return s ? s : r; }
   int16_t setRxBw(float bw)                { bw_ = bw; return restartRx(); }
   float   rxBw() const                     { return bw_; }
@@ -72,10 +72,21 @@ class PocsagRadio {
   float   rssiNow();
   void    poll();                          // call from loop()
 
+  // ---- board-to-board frequency alignment (LoRa mode, see calEnter) ----
+  // Temporarily switch the chip to LoRa: its demodulator measures the frequency error of each
+  // received packet, which FSK reception can't do on both chips. calExit() restores POCSAG.
+  int16_t calEnter(float freq);
+  int16_t calExit(float freq)              { return begin(freq, pwr_, bw_, ric_, mask_, cb_); }
+  int16_t calBeacon(const char* call, uint8_t count);
+  // average error (Hz) over up to n beacon packets on freq; firstWaitMs for the first packet,
+  // nextWaitMs for each further one. got = packets used.
+  int16_t calMeasure(float freq, uint8_t n, uint32_t firstWaitMs, uint32_t nextWaitMs, float& err, uint8_t& got);
+
  private:
   int16_t startRx();
   int16_t restartRx()                      { chip_.standby(); return startRx(); }
   float freq_ = 439.9875f, bw_ = BW_DEFAULT;
+  int8_t pwr_ = 10;
   uint32_t ric_ = 0, mask_ = 0x1FFFFF;
   PageCb cb_ = nullptr;
 
@@ -113,7 +124,7 @@ class PocsagRadio {
 #if defined(BOARD_T3_V161)
 
 int16_t PocsagRadio::begin(float freq, int8_t pwr, float bw, uint32_t ric, uint32_t mask, PageCb cb) {
-  freq_ = freq; bw_ = bw; ric_ = ric; mask_ = mask; cb_ = cb;
+  freq_ = freq; bw_ = bw; ric_ = ric; mask_ = mask; cb_ = cb; pwr_ = pwr;
   // T3 uses non-default SPI pins; default VSPI (SCK 18, MOSI 23) would clash with NSS/RESET
   SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_NSS);
   ConfigFSK_t c;
@@ -177,7 +188,7 @@ PocsagRadio*  PocsagRadio::self_ = nullptr;
 void IRAM_ATTR PocsagRadio::onPacket() { pktFlag_ = true; }
 
 int16_t PocsagRadio::begin(float freq, int8_t pwr, float bw, uint32_t ric, uint32_t mask, PageCb cb) {
-  freq_ = freq; bw_ = bw; ric_ = ric; mask_ = mask; cb_ = cb; self_ = this;
+  freq_ = freq; bw_ = bw; ric_ = ric; mask_ = mask; cb_ = cb; pwr_ = pwr; self_ = this;
   SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_NSS);
   chip_.tcxoVoltage = TCXO_VOLTAGE;
   ConfigFSK_t c;
@@ -274,3 +285,57 @@ void PocsagRadio::poll() {
   if (decoder_.active() && millis() - lastPktMs_ > pktMs + 500) decoder_.flush();
 }
 #endif
+
+// ======================================================================================
+// Board-to-board alignment, common to both chips
+static const char CAL_TAG[] = "PCAL ";              // beacon payload: "PCAL <callsign>"
+
+int16_t PocsagRadio::calEnter(float freq) {
+  chip_.standby();
+  ConfigLoRa_t c;
+  c.frequency = freq;
+  c.bandwidth = 125.0f;        // captures offsets up to about +-30 kHz
+  c.spreadingFactor = 7;       // ~50 ms per beacon packet
+  c.codingRate = 5;
+  c.syncWord = RADIOLIB_LORA_SYNC_WORD_PRIVATE;
+  c.power = pwr_;
+  c.preambleLength = 8;
+  int16_t s = chip_.begin(c);
+#if defined(BOARD_HELTEC_V3)
+  if (!s) s = chip_.setDio2AsRfSwitch(true);
+#endif
+  return s;
+}
+
+int16_t PocsagRadio::calBeacon(const char* call, uint8_t count) {
+  char msg[24];
+  snprintf(msg, sizeof msg, "%s%s", CAL_TAG, call && call[0] ? call : "NOCALL");
+  int16_t s = RADIOLIB_ERR_NONE;
+  for (uint8_t i = 0; i < count; i++) {
+    s = chip_.transmit((const uint8_t*)msg, strlen(msg));
+    if (s) break;
+    delay(100);
+  }
+  return s;
+}
+
+int16_t PocsagRadio::calMeasure(float freq, uint8_t n, uint32_t firstWaitMs, uint32_t nextWaitMs,
+                                float& err, uint8_t& got) {
+  err = 0; got = 0;
+  int16_t s = chip_.setFrequency(freq);
+  if (s) return s;
+  float sum = 0;
+  uint32_t deadline = millis() + firstWaitMs;
+  uint8_t buf[32];
+  while (got < n && (int32_t)(millis() - deadline) < 0) {
+    uint32_t left = deadline - millis();
+    s = chip_.receive(buf, sizeof buf, left > 1000 ? 1000 : left);   // short slices keep it responsive
+    if (s == RADIOLIB_ERR_NONE && memcmp(buf, CAL_TAG, sizeof CAL_TAG - 1) == 0) {
+      sum += chip_.getFrequencyError();
+      got++;
+      deadline = millis() + nextWaitMs;      // next packet should follow soon
+    }
+  }
+  if (got) err = sum / got;
+  return RADIOLIB_ERR_NONE;
+}
