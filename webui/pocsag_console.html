@@ -81,6 +81,10 @@ input[type=text],input[type=number],select{width:100%;padding:7px 9px;border:1px
 .diag label{font-size:.82rem}
 .diag input[type=number]{background:transparent}
 .diag .btn.cw{border-color:var(--tx)}
+.meter-row{display:flex;align-items:center;gap:10px;margin-top:12px}
+.meter-val{font-variant-numeric:tabular-nums;color:var(--ink)}
+.meter{height:10px;border:1px solid var(--edge);border-radius:3px;overflow:hidden;margin-top:8px}
+.meter-fill{height:100%;width:0;background:var(--rx);transition:width .2s}
 .dirty{color:var(--tx);font-size:.88rem;margin-top:8px;display:none}
 .dirty.show{display:block}
 
@@ -129,7 +133,7 @@ fieldset:disabled{opacity:.55}
   .top{padding:12px 16px}
   .msg-text{font-size:1.5rem}
 }
-@media (prefers-reduced-motion:reduce){.msg.new{animation:none}.diag-title::before{transition:none}.toast{transition:none}}
+@media (prefers-reduced-motion:reduce){.msg.new{animation:none}.diag-title::before{transition:none}.meter-fill{transition:none}.toast{transition:none}}
 </style>
 </head>
 <body>
@@ -158,6 +162,7 @@ fieldset:disabled{opacity:.55}
         <label for="txText">Message <span class="counter" id="txCount">0 / 80</span></label>
         <input type="text" id="txText" maxlength="240" autocomplete="off" placeholder="Message text">
         <p class="hint" id="txHint"></p>
+        <p class="hint" id="txAir"></p>
         <div class="row" style="margin-top:12px"><button class="btn tx" id="txBtn" type="submit">Transmit</button></div>
       </form>
     </section>
@@ -170,6 +175,9 @@ fieldset:disabled{opacity:.55}
         <button class="btn" type="submit">Apply</button>
       </form>
       <label class="check"><input type="checkbox" id="monIn"> Show pages for every RIC</label>
+      <label for="bwIn">Receive filter width</label>
+      <select id="bwIn"></select>
+      <p class="hint" id="bwHint">Narrower filters hear weaker pages, but the frequency has to be calibrated. The signal itself is about 12 kHz wide.</p>
     </section>
 
     <section aria-labelledby="h-pwr">
@@ -186,6 +194,11 @@ fieldset:disabled{opacity:.55}
       </form>
       <p class="hint" id="pwrRange"></p>
       <p class="hint" id="pwrNote">Chip output. Modules with an external PA add their own gain.</p>
+      <form id="txmaxForm" class="row">
+        <div><label for="txmaxIn">Transmit time limit, seconds</label><input type="number" id="txmaxIn"></div>
+        <button class="btn" type="submit">Apply</button>
+      </form>
+      <p class="hint">Pages that would take longer are refused, and a stuck transmitter is switched off.</p>
     </section>
 
     <section aria-labelledby="h-dev">
@@ -200,7 +213,10 @@ fieldset:disabled{opacity:.55}
         <div><label for="pinIn">Bluetooth PIN, 6 digits</label><input type="text" id="pinIn" inputmode="numeric" maxlength="6" autocomplete="off" placeholder="unchanged"></div>
         <button class="btn" type="submit">Set PIN</button>
       </form>
-      <div class="row" style="margin-top:8px"><button class="btn small" id="forgetBtn" type="button">Forget paired phones</button></div>
+      <div class="row row-wrap" style="margin-top:8px">
+        <button class="btn small" id="forgetBtn" type="button">Forget paired phones</button>
+        <button class="btn small" id="logClearBtn" type="button">Clear pages stored on board</button>
+      </div>
       <label class="check"><input type="checkbox" id="ledIn"> Blink the board LED on send, receive and heartbeat</label>
       <p class="dirty" id="dirty">Changes are active but not saved. They'll be lost when the board resets.</p>
     </section>
@@ -225,6 +241,11 @@ fieldset:disabled{opacity:.55}
           <div><label for="cwSecs">Carrier, seconds</label><input type="number" id="cwSecs" min="1" max="30" value="5"></div>
           <button class="btn cw" type="submit" id="cwBtn">Send carrier</button>
         </form>
+        <div class="meter-row">
+          <button class="btn" type="button" id="rssiBtn">Show live signal</button>
+          <span class="meter-val" id="rssiVal"></span>
+        </div>
+        <div class="meter" aria-hidden="true"><div class="meter-fill" id="rssiBar"></div></div>
         <p class="hint" id="stepHint"></p>
         <p class="hint">Corrections take effect at once; use Save settings to board to keep them.</p>
       </div>
@@ -265,6 +286,7 @@ const store = {
 let port = null, reader = null, writer = null, keepReading = false;
 let link = null;          // {kind:"usb"|"ble", write(text), close()}
 let bleDev = null, rxBuf = "", bleDec = new TextDecoder();
+let logRequested = false, logNew = 0, rssiOn = false, rssiKeep = null;
 let cfg = null, savedCfg = null, txPending = null;
 let messages = store.get("pocsag.msgs", []);
 let recentRics = store.get("pocsag.rics", []);
@@ -287,7 +309,10 @@ function setLink(state){
   $("linkText").textContent = state === "off" ? "Offline" : state === "tx" ? "Transmitting" : "Connected";
   $("pagerStatus").textContent = state === "off" ? "NO SIGNAL" : state === "tx" ? "TX ..." : "LISTENING";
 }
-const fmtTime = ts => new Date(ts).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"});
+const fmtTime = ts => ts == null ? "EARLIER" :
+  (new Date(ts).toDateString() === new Date().toDateString()
+    ? new Date(ts).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"})
+    : new Date(ts).toLocaleString([], {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"}));
 
 function renderMsgs(newId){
   const ul = $("msgs"); ul.textContent = "";
@@ -305,6 +330,7 @@ function renderMsgs(newId){
       m.func != null ? ["", "F" + m.func] : null,
       m.rssi != null ? ["", m.rssi + " dBm"] : null,
       m.fixes ? ["", m.fixes + " corrected"] : null,
+      m.air ? ["", m.air.toFixed(1) + " s"] : null,
       m.err ? ["flag", m.err] : null
     ].filter(Boolean);
     for (const [c, t] of parts){ const s = document.createElement("span"); if (c) s.className = c; s.textContent = t; meta.appendChild(s); }
@@ -313,10 +339,17 @@ function renderMsgs(newId){
     li.append(meta, text); ul.appendChild(li);
   }
 }
-function addMsg(m){
-  m.id = Date.now() + Math.random(); m.ts = Date.now();
-  messages.unshift(m); if (messages.length > 300) messages.length = 300;
-  store.set("pocsag.msgs", messages); renderMsgs(m.id);
+// ts: when it happened (null = before the board's last restart); quiet: no highlight
+function addMsg(m, ts, quiet){
+  m.id = Date.now() + Math.random();
+  m.ts = ts === undefined ? Date.now() : ts;
+  // keep newest first; pages with unknown time go below the dated ones
+  const t = m.ts == null ? -1 : m.ts;
+  let i = messages.findIndex(x => (x.ts == null ? -1 : x.ts) < t);
+  if (i < 0) i = messages.length;
+  messages.splice(i, 0, m);
+  if (messages.length > 300) messages.length = 300;
+  store.set("pocsag.msgs", messages); renderMsgs(quiet ? null : m.id);
 }
 function rememberRic(ric){
   recentRics = [String(ric), ...recentRics.filter(r => r !== String(ric))].slice(0, 12);
@@ -327,7 +360,7 @@ function fillRics(){
   for (const r of recentRics){ const o = document.createElement("option"); o.value = r; dl.appendChild(o); }
 }
 
-const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led, c.ble, c.call, c.autoid].join("|") : "";
+const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led, c.ble, c.call, c.autoid, c.bw, c.txmax].join("|") : "";
 function renderCfg(){
   if (!cfg) return;
   $("board").textContent = cfg.board + (cfg.ble && cfg.blename ? `, Bluetooth ${cfg.blename}` : "") +
@@ -347,6 +380,23 @@ function renderCfg(){
   $("ledIn").checked = cfg.led !== false;
   if (document.activeElement !== $("callIn")) $("callIn").value = cfg.call || "";
   $("autoIdIn").checked = !!cfg.autoid;
+  if (Array.isArray(cfg.bws)){
+    const sel = $("bwIn"), key = cfg.bws.join(",");
+    if (sel.dataset.key !== key){
+      sel.textContent = ""; sel.dataset.key = key;
+      for (const v of cfg.bws){
+        const o = document.createElement("option"); o.value = v;
+        const total = cfg.bwss ? v * 2 : v;
+        o.textContent = `${total.toFixed(1)} kHz` + (cfg.bwss ? ` (setting ${v})` : "");
+        sel.appendChild(o);
+      }
+    }
+    sel.value = String(cfg.bws.find(v => Math.abs(v - cfg.bw) < 0.05) ?? cfg.bw);
+  }
+  if (cfg.txmax != null){
+    const t = $("txmaxIn"); t.min = cfg.txmin; t.max = cfg.txmaxmax;
+    if (document.activeElement !== t) t.value = cfg.txmax;
+  }
   updateCount();
   const p = $("pwrIn"); p.min = cfg.pmin; p.max = cfg.pmax;
   if (document.activeElement !== p) p.value = cfg.pwr;
@@ -371,16 +421,35 @@ function handleLine(line){
   let d = {};
   try { d = sp > 0 ? JSON.parse(line.slice(sp + 1)) : {}; } catch(e){ logLine("(unparsable event)", "e"); return; }
   switch (type){
-    case "CFG": cfg = d; renderCfg(); break;
+    case "CFG":
+      cfg = d; renderCfg();
+      if (link && !logRequested){ logRequested = true; logNew = 0; send("/log"); }
+      break;
     case "RX": {
-      let err = d.bad ? `${d.bad} bad codeword${d.bad > 1 ? "s" : ""}` : "";
-      addMsg({dir:"rx", ric:d.ric, func:d.func, text:d.text, rssi:d.rssi, fixes:d.fixes, err});
+      const key = d.id != null ? `${(cfg && (cfg.blename || cfg.board)) || "board"}#${d.id}` : null;
+      if (key && messages.some(m => m.key === key)) break;          // already shown
+      const err = d.bad ? `${d.bad} bad codeword${d.bad > 1 ? "s" : ""}` : "";
+      const ts = d.age == null ? null : Date.now() - d.age * 1000;
+      addMsg({dir:"rx", key, ric:d.ric, func:d.func, text:d.text, rssi:d.rssi, fixes:d.fixes, err}, ts, !!d.replay);
+      if (d.replay) logNew++;
       break;
     }
+    case "LOGEND":
+      if (logNew) toast(`Loaded ${logNew} page${logNew > 1 ? "s" : ""} stored on the board`);
+      logNew = 0; break;
+    case "RSSI":
+      if (d.on === false){ rssiSet(false, true); break; }
+      if (typeof d.dbm === "number"){
+        $("rssiVal").textContent = `${d.dbm.toFixed(1)} dBm`;
+        const pct = Math.max(0, Math.min(100, (d.dbm + 130) / 90 * 100));   // -130..-40 dBm
+        $("rssiBar").style.width = pct + "%";
+      }
+      break;
     case "TX":
       if (txPending){ clearTimeout(txPending.timer); txPending = null; }
       setLink("on"); $("txBtn").disabled = false;
-      addMsg({dir:"tx", ric:d.ric, kind:d.kind, text:d.text, err: d.ok ? "" : "failed, code " + d.code});
+      addMsg({dir:"tx", ric:d.ric, kind:d.kind, text:d.text, air:d.airtime,
+              err: d.ok ? "" : (d.code === -5 ? "stopped by time limit" : "failed, code " + d.code)});
       d.ok ? toast(`Sent to RIC ${d.ric}`) : toast(`Transmit failed (code ${d.code})`, true);
       break;
     case "CW":
@@ -414,7 +483,7 @@ function feed(text){
 }
 
 function linkUp(kind){
-  savedCfg = null; rxBuf = "";
+  savedCfg = null; rxBuf = ""; logRequested = false;
   setLink("on"); $("controls").disabled = false;
   $("connectBtn").textContent = "Disconnect"; $("connectBtn").disabled = false; $("bleBtn").hidden = true;
   $("connectBtn").classList.add("primary");
@@ -521,6 +590,7 @@ async function disconnect(lost){
   $("bleBtn").hidden = !("bluetooth" in navigator);
   $("board").textContent = "No board connected";
   $("calSum").textContent = "not connected";
+  rssiSet(false, true);
   $("saveBtn").classList.remove("tx");
   if (lost) toast(wasBle ? "Bluetooth connection lost" : "Board disconnected", true);
   renderMsgs();
@@ -535,6 +605,12 @@ $("connectBtn").onclick = () => link ? disconnect(false) : connectUsb();
 $("bleBtn").onclick = () => connectBle();
 navigator.serial && navigator.serial.addEventListener("disconnect", e => { if (e.target === port) disconnect(true); });
 
+// same formula as the firmware: 18 preamble words + 17 words per batch, 32 bits at 1200 bps
+function airtime(ric, kind, len){
+  const sym = kind === "n" ? 4 : 7, blocks = kind === "t" ? 0 : Math.ceil(len * sym / 20);
+  const batches = Math.floor((2 * (ric & 7) + blocks + 16) / 16);
+  return (18 + 17 * batches) * 32 / ((cfg && cfg.baud) || 1200);
+}
 function updateCount(){
   const kind = $("txKind").value, n = $("txText").value.length;
   $("txText").disabled = kind === "t";
@@ -552,6 +628,14 @@ function updateCount(){
   else if (call) hint = `Include ${call} to identify the transmission.`;
   else hint = "Set your callsign under Transmitter to identify your transmissions.";
   $("txHint").textContent = hint;
+  const ric = parseInt($("txRic").value, 10);
+  if (cfg && ric > 0){
+    const len = kind === "a" ? sent : n;
+    const air = airtime(ric, kind, len);
+    $("txAir").textContent = cfg.txmax && air > cfg.txmax
+      ? `About ${air.toFixed(1)} s on air, longer than the ${cfg.txmax} s limit. Shorten the message or raise the limit.`
+      : `About ${air.toFixed(1)} s on air.`;
+  } else $("txAir").textContent = "";
 }
 $("txText").oninput = updateCount; $("txKind").onchange = updateCount;
 
@@ -602,6 +686,21 @@ $("callForm").onsubmit = e => {
 $("autoIdIn").onchange = () => send(`/autoid ${$("autoIdIn").checked ? 1 : 0}`);
 $("forgetBtn").onclick = () => send("/bleforget");
 $("pwrMax").onclick = () => { if (cfg) send(`/pwr ${cfg.pmax}`); };
+function rssiSet(on, silent){
+  rssiOn = on;
+  clearInterval(rssiKeep); rssiKeep = null;
+  $("rssiBtn").textContent = on ? "Stop live signal" : "Show live signal";
+  if (!on){ $("rssiVal").textContent = ""; $("rssiBar").style.width = "0"; }
+  if (silent) return;
+  send(`/rssi ${on ? 1 : 0}`);
+  if (on) rssiKeep = setInterval(() => send("/rssi 1"), 60000);   // board stops after 2 min on its own
+}
+$("rssiBtn").onclick = () => rssiSet(!rssiOn);
+$("calib").addEventListener("toggle", () => { if (!$("calib").open && rssiOn) rssiSet(false); });
+$("bwIn").onchange = () => send(`/bw ${$("bwIn").value}`);
+$("txmaxForm").onsubmit = e => { e.preventDefault(); const v = parseInt($("txmaxIn").value, 10); if (!isNaN(v)) send(`/txmax ${v}`); };
+$("logClearBtn").onclick = () => send("/logclear");
+$("txRic").oninput = updateCount;
 $("saveBtn").onclick = () => send("/save");
 $("clsBtn").onclick = () => send("/cls");
 $("clearMsgs").onclick = () => { messages = []; store.set("pocsag.msgs", messages); renderMsgs(); };
