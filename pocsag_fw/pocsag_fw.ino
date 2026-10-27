@@ -121,6 +121,25 @@ static void oledInit() {
   oledOk = true;
 }
 
+// Flash the whole display negative and back (SSD1306 "inverse display" command), e.g. as a
+// pager-style alert. Run from loop(), never from a timer: it talks I2C.
+static uint8_t  flashLeft = 0;
+static uint32_t flashAt = 0;
+static void oledInvert(bool on) {
+  if (!oledOk) return;
+  u8x8_t* u = oled.getU8x8();
+  u8x8_cad_StartTransfer(u);
+  u8x8_cad_SendCmd(u, on ? 0xA7 : 0xA6);     // 0xA7 inverse, 0xA6 normal
+  u8x8_cad_EndTransfer(u);
+}
+static void oledFlash(uint8_t times) { flashLeft = times * 2; flashAt = millis() - 1000; }
+static void serviceFlash() {
+  if (!flashLeft || millis() - flashAt < 250) return;
+  flashAt = millis();
+  flashLeft--;
+  oledInvert(flashLeft & 1);                  // odd = negative; ends on normal
+}
+
 // ---------------- JSON helpers ----------------
 static void jsonStr(String& o, const char* s) {
   o += '"';
@@ -196,6 +215,7 @@ static void emitRx(const LogEntry& e, long age, bool replay) {
 
 static void onPage(const RxPage& p) {
   if (p.ric == myRic) ledBlink(3, 300); else ledBlink(1, 150);
+  if (p.ric == myRic && !p.text[0]) oledFlash(5);   // tone-only page for us: flash the display
   logf("RX %lu%s\n%s\n", (unsigned long)p.ric, p.bad > 0 ? " ERR" : (p.fixes > 0 ? " fix" : ""),
        p.text[0] ? p.text : "(tone)");
   const LogEntry& e = msgLog.add(p.ric, p.func, p.text, p.numeric, p.fixes, p.bad, p.rssi);
@@ -697,6 +717,7 @@ void loop() {
   static uint32_t dapEmitted = 0;
   if (dapChanged && millis() - dapEmitted > 300) { dapChanged = false; dapEmitted = millis(); emitDap(); }
   serviceRssi();
+  serviceFlash();
   msgLog.service();
 
   if (Serial.available()) processLine(Serial.readStringUntil('\n'));

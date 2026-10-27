@@ -1,7 +1,9 @@
 /*
   POCSAG radio layer: same interface for both boards.
 
-    SX1278 (T3)    : TX and RX with RadioLib PagerClient (RX in direct mode, DIO1 clock / DIO2 data)
+    SX1278 (T3)    : TX with RadioLib PagerClient; RX in direct mode (DIO1 bit clock, DIO2 data),
+                     bits collected by an interrupt, frame sync and batches found here, decoded by
+                     pocsag_rx.h (BCH error correction)
     SX1262 (Heltec), SX1268 (E22): TX with PagerClient; RX via the GFSK packet engine +
                      pocsag_rx.h decoder, because the SX126x has no direct-mode outputs.
 
@@ -22,7 +24,7 @@
 
 struct RxPage {
   uint32_t ric;
-  int8_t   func;         // -1 = unknown (T3: RadioLib doesn't report it)
+  int8_t   func;         // function bits 0..3, -1 = unknown
   const char* text;
   int8_t   numeric;      // -1 unknown, 0 alpha, 1 numeric
   int16_t  fixes, bad;   // -1 unknown
@@ -94,11 +96,26 @@ class PocsagRadio {
 #if defined(BOARD_T3_V161)
   TxGuard<SX1278> chip_{new Module(PIN_NSS, PIN_DIO0, PIN_RST, PIN_DIO1)};
   PagerClient pager_{&chip_};
-  int lastAvail_ = 0;
-  uint32_t availSince_ = 0;
+  // direct-mode receive: the ISR stores one bit per DIO1 clock edge, poll() works through them
+  static const uint16_t RING = 2048;              // bits, ~1.7 s at 1200 bps (power of 2)
+  static volatile uint8_t  ring_[RING];
+  static volatile uint16_t wr_;
+  static volatile bool     rxOn_;
+  static PocsagRadio*      self_;
+  uint16_t rd_ = 0;
+  uint64_t sr_ = 0;                               // last 64 received bits
+  bool     synced_ = false;
+  uint8_t  nb_ = 0, idx_ = 0;                     // bits in the current word, word in batch
+  uint32_t batch_[16];
+  pocsag::Decoder decoder_{&PocsagRadio::onDecoded};
+  static void onBit();        // ISR, out of line (see onPacket below)
+  static void onDecoded(uint32_t ric, uint8_t func, const char* text, bool numeric, int fixes, int bad);
+  void rxBit(uint8_t b);
   void prepTx() {
     // In continuous mode the SX1278 FSK-modulates whatever is on DIO2. After RX that is a
     // floating ESP input and the deviation is 4.5 kHz -> pin it low, minimum deviation.
+    rxOn_ = false;
+    chip_.clearDio1Action();
     chip_.standby();
     pinMode(PIN_DIO2, OUTPUT);
     digitalWrite(PIN_DIO2, LOW);
@@ -125,7 +142,7 @@ class PocsagRadio {
 #if defined(BOARD_T3_V161)
 
 int16_t PocsagRadio::begin(float freq, int8_t pwr, float bw, uint32_t ric, uint32_t mask, PageCb cb) {
-  freq_ = freq; bw_ = bw; ric_ = ric; mask_ = mask; cb_ = cb; pwr_ = pwr;
+  freq_ = freq; bw_ = bw; ric_ = ric; mask_ = mask; cb_ = cb; pwr_ = pwr; self_ = this;
   // T3 uses non-default SPI pins; default VSPI (SCK 18, MOSI 23) would clash with NSS/RESET
   SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_NSS);
   ConfigFSK_t c;
@@ -136,11 +153,68 @@ int16_t PocsagRadio::begin(float freq, int8_t pwr, float bw, uint32_t ric, uint3
   return startRx();
 }
 
+volatile uint8_t  PocsagRadio::ring_[PocsagRadio::RING];
+volatile uint16_t PocsagRadio::wr_ = 0;
+volatile bool     PocsagRadio::rxOn_ = false;
+PocsagRadio*      PocsagRadio::self_ = nullptr;
+
+void IRAM_ATTR PocsagRadio::onBit() {             // DIO1 rising edge = middle of a bit
+  if (!rxOn_) return;
+  uint16_t w = wr_;
+  ring_[w & (RING - 1)] = (uint8_t)digitalRead(PIN_DIO2);
+  wr_ = w + 1;
+}
+
 int16_t PocsagRadio::startRx() {
-  // RxBw is not touched by PagerClient; RadioLib's FSK default would be 125 kHz
-  int16_t s = chip_.setRxBandwidth(bw_);          if (s) return s;
-  // also restores RX frequency, 4.5 kHz deviation and DIO2 as input
-  return pager_.startReceive(PIN_DIO2, ric_, mask_);
+  rxOn_ = false;
+  decoder_.flush();
+  synced_ = false;
+  decoder_.setFilter(ric_, mask_);
+  int16_t s;
+  if ((s = chip_.setRxBandwidth(bw_))) return s;  // RadioLib's FSK default would be 125 kHz
+  if ((s = chip_.setFrequency(freq_))) return s;
+  if ((s = chip_.setBitRate(POCSAG_BAUD / 1000.0f))) return s;
+  if ((s = chip_.setFrequencyDeviation(POCSAG_SHIFT / 1000.0f))) return s;
+  pinMode(PIN_DIO2, INPUT);
+  chip_.setDirectAction(onBit);                   // interrupt on DIO1 (bit clock)
+  s = chip_.receiveDirect();                      // continuous mode: DIO1 clock, DIO2 data
+  rd_ = wr_;
+  rxOn_ = (s == RADIOLIB_ERR_NONE);
+  return s;
+}
+
+void PocsagRadio::onDecoded(uint32_t ric, uint8_t func, const char* text, bool numeric, int fixes, int bad) {
+  if (!self_ || !self_->cb_) return;
+  RxPage p = { ric, (int8_t)func, text, (int8_t)(numeric ? 1 : 0), (int16_t)fixes, (int16_t)bad,
+               self_->rssiNow() };
+  self_->cb_(p);
+}
+
+// One demodulated bit (already in POCSAG polarity: 1 = lower frequency).
+// Frame sync: the 32-bit FSC with up to 2 wrong bits when it follows the 1010 preamble (start
+// of a transmission), up to 1 wrong bit elsewhere; between batches up to 3 wrong bits are
+// accepted, as the position is already known. Codewords then go through the BCH decoder,
+// which corrects up to 2 wrong bits in each.
+void PocsagRadio::rxBit(uint8_t b) {
+  sr_ = (sr_ << 1) | b;
+  uint32_t w = (uint32_t)sr_;
+  if (!synced_) {
+    int d = __builtin_popcount(w ^ pocsag::FSC);
+    if (d > 2) return;
+    uint32_t prev = (uint32_t)(sr_ >> 32);
+    bool preamble = __builtin_popcount(prev ^ 0xAAAAAAAAUL) <= 4 || __builtin_popcount(prev ^ 0x55555555UL) <= 4;
+    if (d <= 1 || preamble) { synced_ = true; nb_ = 0; idx_ = 0; }
+    return;
+  }
+  if (++nb_ < 32) return;
+  nb_ = 0;
+  if (idx_ < 16) {
+    batch_[idx_++] = w;
+    if (idx_ == 16 && !decoder_.feedBatch(batch_)) synced_ = false;   // noise, hunt again
+    return;
+  }
+  idx_ = 0;                                       // word after a batch must be the next FSC
+  if (__builtin_popcount(w ^ pocsag::FSC) > 3) { decoder_.flush(); synced_ = false; }
 }
 
 int16_t PocsagRadio::transmit(uint32_t ric, char kind, String& text, uint8_t func) {
@@ -165,19 +239,14 @@ int16_t PocsagRadio::carrierOn() {
 float PocsagRadio::rssiNow() { return chip_.getRSSI(false, true); }   // skipReceive: keep direct RX running
 
 void PocsagRadio::poll() {
-  // RadioLib buffers whole batches. Read once the transmission is over (no new batch for
-  // ~1.5 batch times) or the buffer is getting full (direct buffer holds ~3.7 batches).
-  int a = pager_.available();
-  if (a != lastAvail_) { lastAvail_ = a; availSince_ = millis(); }
-  if (a <= 0) return;
-  if (a < 3 && millis() - availSince_ < 700) return;
-  String msg;
-  uint32_t addr = 0;
-  int16_t s = pager_.readData(msg, 0, &addr);
-  lastAvail_ = pager_.available(); availSince_ = millis();
-  if (s != RADIOLIB_ERR_NONE || !cb_) return;
-  RxPage p = { addr, -1, msg.c_str(), -1, -1, -1, rssiNow() };
-  cb_(p);
+  if (!rxOn_) return;
+  uint16_t w = wr_;
+  if ((uint16_t)(w - rd_) > RING) {               // loop() was blocked too long: skip ahead
+    rd_ = w - RING;
+    decoder_.flush(); synced_ = false;
+  }
+  // chip: higher frequency = 1; POCSAG: lower frequency = 1
+  while (rd_ != w) { uint8_t b = ring_[rd_ & (RING - 1)]; rd_++; rxBit(POCSAG_INVERT ? b : !b); }
 }
 
 // ======================================================================================
@@ -321,7 +390,9 @@ void PocsagRadio::poll() {
           uint32_t s = be32(buf + off); off += 4;
           if (__builtin_popcount(s ^ pocsag::FSC) > 3) { decoder_.flush(); ended = true; break; }
         }
-        for (uint8_t i = 0; i < 16; i++, off += 4) decoder_.feed(be32(buf + off), i);
+        uint32_t cw[16];
+        for (uint8_t i = 0; i < 16; i++, off += 4) cw[i] = be32(buf + off);
+        if (!decoder_.feedBatch(cw)) { ended = true; break; }   // noise, not a batch
       }
     }
   }
@@ -336,6 +407,10 @@ void PocsagRadio::poll() {
 static const char CAL_TAG[] = "PCAL ";              // beacon payload: "PCAL <callsign>"
 
 int16_t PocsagRadio::calEnter(float freq) {
+#if defined(BOARD_T3_V161)
+  rxOn_ = false;
+  chip_.clearDio1Action();
+#endif
   chip_.standby();
   ConfigLoRa_t c;
   c.frequency = freq;

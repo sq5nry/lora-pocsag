@@ -67,6 +67,18 @@ class Decoder {
     }
   }
 
+  // A whole batch (16 codewords after an FSC). Noise that happened to look like an FSC gives
+  // mostly uncorrectable words (about 3 in 4), a real batch even at the edge of reception
+  // mostly correctable ones: fewer than 8 good words -> treat as noise, end any message.
+  // Returns false for noise.
+  bool feedBatch(const uint32_t* cw) {
+    uint8_t good = 0;
+    for (uint8_t i = 0; i < 16; i++) { uint32_t t = cw[i]; if (correct(t) >= 0) good++; }
+    if (good < 8) { flush(); return false; }
+    for (uint8_t i = 0; i < 16; i++) feed(cw[i], i);
+    return true;
+  }
+
   // end the current message (idle, new address, end of transmission)
   void flush() {
     if (!active_) return;
