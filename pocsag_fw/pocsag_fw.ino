@@ -1,9 +1,10 @@
 /*
   lora-pocsag firmware: POCSAG pager transmitter/receiver on 70 cm with LoRa boards.
 
-  One sketch for both boards; the board is picked automatically (see board.h):
-    LilyGO T3 V1.6.1      (ESP32    + SX1278)  Arduino board: "TTGO LoRa32-OLED" or "ESP32 Dev Module"
+  One sketch for all boards; the profile follows the board chosen in the Arduino IDE (board.h):
+    LilyGO T3 V1.6.1      (ESP32    + SX1278)  Arduino board: "TTGO LoRa32-OLED"
     Heltec WiFi LoRa 32 V3 (ESP32-S3 + SX1262) Arduino board: "Heltec WiFi LoRa 32(V3)"
+    ESP32 DevKit + Ebyte E22-400M30S (SX1268)  Arduino board: "ESP32 Dev Module"
 
   Libraries (Library Manager): RadioLib, U8g2, NimBLE-Arduino (2.x)
 
@@ -12,6 +13,10 @@
   Lines starting with '@' are JSON events for the web console:
     @CFG config   @RX received page   @TX transmit result   @CW carrier on/off
     @RSSI live signal level   @LOGEND end of /log replay   @CAL board-to-board tuning   @OK / @ERR
+    @DAP DAPNET link status
+
+  DAPNET: with WiFi set (/wifi) and a registered transmitter (/dapnet name, /dapnet key), /dapnet 1
+  logs the board into the DAPNET core; pages routed to it go out in its assigned time slots.
 */
 
 #include <Wire.h>
@@ -23,6 +28,7 @@
 #include "radio.h"
 #include "msg_log.h"
 #include "ble_link.h"
+#include "dapnet.h"
 
 // ---------------- defaults (used until changed at runtime and stored with /save) ----------------
 static const float    FREQ_MHZ        = 439.9875;   // DAPNET channel
@@ -34,7 +40,7 @@ static const bool     DEFAULT_LED     = true;
 static const bool     DEFAULT_BLE     = true;
 static const char*    DEFAULT_CALL    = "XX9YYY";   // placeholder until set with /call
 static const uint8_t  DEFAULT_TXMAX   = 10;         // s, transmit time limit
-static const uint32_t DEFAULT_DEST    = 555555;     // destination RIC offered in the web console
+static const uint32_t DEFAULT_DEST    = 123456;     // destination RIC offered in the web console
 static const uint8_t  TXMAX_MIN = 2, TXMAX_MAX = 60;
 
 // ---------------- runtime settings ----------------
@@ -50,12 +56,16 @@ static bool     autoId     = true;
 static float    rxBw       = BW_DEFAULT;
 static uint8_t  txMax      = DEFAULT_TXMAX;
 static uint32_t lastDest   = DEFAULT_DEST;          // last RIC a page was sent to, kept by /save
+static bool     dapOn      = false;                 // DAPNET transmitter link
 
 static Preferences prefs;
 static PocsagRadio radio;
 static MsgLog      msgLog;
 BleLink ble;
 DualOut out(ble);                                   // USB serial + paired BLE phone
+static Dapnet dap;
+static volatile bool dapChanged = false;
+static uint16_t dapRev = 0;                        // bumped on every DAPNET/WiFi setting change
 
 static inline float curFreq() { return FREQ_MHZ + corrHz / 1e6f; }
 static inline uint32_t rxMask() { return monAll ? 0 : 0x1FFFFF; }
@@ -159,7 +169,14 @@ static void emitCfg() {
     callsign, autoId ? "true" : "false", PWR_NOTE,
     rxBw, BW_SINGLE_SIDED ? "true" : "false", txMax, TXMAX_MIN, TXMAX_MAX, MsgLog::LOG_N,
     (unsigned long)lastDest);
-  emitEvt("CFG", String(b) + bws + "}");
+  String d = ",\"dap\":" + String(dapOn ? "true" : "false") + ",\"wssid\":";
+  jsonStr(d, dap.ssid.c_str());
+  d += ",\"wpass\":" + String(dap.pass.length() ? "true" : "false") + ",\"dsrv\":";
+  jsonStr(d, (dap.host + ":" + String(dap.port)).c_str());
+  d += ",\"dname\":";
+  jsonStr(d, dap.name.c_str());
+  d += ",\"dkey\":" + String(dap.key.length() ? "true" : "false") + ",\"drev\":" + String(dapRev);
+  emitEvt("CFG", String(b) + bws + d + "}");
 }
 
 // ---------------- received pages ----------------
@@ -197,6 +214,8 @@ static void replayLog() {
 static Ticker txWatch;
 static void txWatchFire() { radio.abortTx(); }    // timer context: only sets a flag
 
+static int16_t txPage(uint32_t ric, char kind, String& text, uint8_t func, bool dapnet);
+
 // kind: 'a' alphanumeric, 'n' numeric, 't' tone only
 static void doTx(uint32_t ric, char kind, String text) {   // by value: RadioLib wants String&
   if (ric == 0 || ric > 2097151UL) { emitMsg("ERR", "RIC out of range (1..2097151)"); return; }
@@ -211,22 +230,32 @@ static void doTx(uint32_t ric, char kind, String text) {   // by value: RadioLib
     emitMsg("ERR", m);
     return;
   }
+  txPage(ric, kind, text, RADIOLIB_PAGER_FUNC_AUTO, false);
+}
+
+// key up, send, report; dapnet = page relayed from DAPNET (no ERR toasts for the console user)
+static int16_t txPage(uint32_t ric, char kind, String& text, uint8_t func, bool dapnet) {
   ledBusy();
   txWatch.once_ms((uint32_t)(txMax * 1000UL + 500), txWatchFire);   // hard stop if anything hangs
   uint32_t t0 = millis();
-  int16_t st = radio.transmit(ric, kind, text);
+  int16_t st = radio.transmit(ric, kind, text, func);
   txWatch.detach();
   ledIdle();
   float took = (millis() - t0) / 1000.0f;
-  if (st == RADIOLIB_ERR_TX_TIMEOUT) logf("TX %lu ABORTED\n", (unsigned long)ric);
-  else logf("TX %lu %s\n", (unsigned long)ric, st == RADIOLIB_ERR_NONE ? "ok" : "FAIL");
+  const char* pfx = dapnet ? "DTX" : "TX";
+  if (st == RADIOLIB_ERR_TX_TIMEOUT) logf("%s %lu ABORTED\n", pfx, (unsigned long)ric);
+  else logf("%s %lu %s\n", pfx, (unsigned long)ric, st == RADIOLIB_ERR_NONE ? "ok" : "FAIL");
   String j = "{\"ric\":" + String(ric) + ",\"kind\":\"" + String(kind) + "\",\"ok\":" +
              (st == RADIOLIB_ERR_NONE ? "true" : "false") + ",\"code\":" + String(st) +
-             ",\"airtime\":" + String(took, 2) + ",\"text\":";
+             ",\"airtime\":" + String(took, 2);
+  if (func != RADIOLIB_PAGER_FUNC_AUTO) j += ",\"func\":" + String(func);
+  if (dapnet) j += ",\"src\":\"dapnet\"";
+  j += ",\"text\":";
   jsonStr(j, text.c_str());
   j += "}";
   emitEvt("TX", j);
-  if (st == RADIOLIB_ERR_TX_TIMEOUT) emitMsg("ERR", "transmission stopped by the time limit");
+  if (st == RADIOLIB_ERR_TX_TIMEOUT && !dapnet) emitMsg("ERR", "transmission stopped by the time limit");
+  return st;
 }
 
 // ---------------- live RSSI ----------------
@@ -312,6 +341,99 @@ static void calSync(long waitSec) {
   emitCfg();
 }
 
+// ---------------- DAPNET ----------------
+static void emitDap() {
+  uint32_t left = 0;
+  int8_t slot = dap.slotNow(&left);
+  String j = "{\"on\":" + String(dapOn ? "true" : "false") + ",\"state\":\"" + dap.stateName() +
+             "\",\"online\":" + String(dap.state() == Dapnet::ONLINE ? "true" : "false") +
+             ",\"slots\":\"" + dap.slotText() + "\",\"slot\":" + String(slot) +
+             ",\"q\":" + String(dap.queued()) + ",\"rx\":" + String(dap.rxCount) +
+             ",\"tx\":" + String(dap.txCount) + ",\"drop\":" + String(dap.dropCount);
+  if (WiFi.status() == WL_CONNECTED)
+    j += ",\"ip\":\"" + WiFi.localIP().toString() + "\",\"wrssi\":" + String(WiFi.RSSI());
+  j += "}";
+  emitEvt("DAP", j);
+}
+
+static void dapApply() {                       // (re)start or stop after a settings change
+  if (dapOn) dap.start(); else dap.stop();
+  dapChanged = true;
+}
+
+// send the next DAPNET page if it fits into the current slot
+static void serviceDapTx() {
+  if (!dapOn) return;
+  const DapPage* p = dap.peek();
+  if (!p) return;
+  String text = p->text;
+  char kind;
+  if (p->func == 0) kind = 'n';
+  else if (p->func == 1 || text.length() == 0) kind = 't';
+  else kind = 'a';
+  float air = pocsagAirtime(p->ric, kind, text.length());
+  if (air > txMax) {
+    logf("DTX %lu too long\n", (unsigned long)p->ric);
+    dap.pop(); dap.dropCount++;
+    return;
+  }
+  if (!dap.slotOpen(air)) return;
+  uint32_t ric = p->ric;
+  uint8_t func = p->func;
+  dap.pop();
+  if (txPage(ric, kind, text, kind == 't' ? RADIOLIB_PAGER_FUNC_AUTO : func, true) == RADIOLIB_ERR_NONE)
+    dap.txCount++;
+  dapChanged = true;
+}
+
+static void dapCommand(String arg) {
+  String sub = arg, val;
+  int sp = arg.indexOf(' ');
+  if (sp > 0) { sub = arg.substring(0, sp); val = arg.substring(sp + 1); val.trim(); }
+  sub.toLowerCase();
+  if (sub == "" ) { logf("DAPNET %s\n", dapOn ? dap.stateName() : "off"); emitDap(); return; }
+  if (sub == "1" || sub == "on" || sub == "0" || sub == "off") {
+    dapOn = (sub == "1" || sub == "on");
+    if (dapOn && !dap.configured()) emitMsg("ERR", "set /wifi, /dapnet name and /dapnet key first");
+    dapApply();
+  }
+  else if (sub == "name") {
+    if (val.length() < 3 || val.length() > 20) { emitMsg("ERR", "use /dapnet name <transmitter name>"); return; }
+    val.toLowerCase(); dap.name = val; if (dapOn) dapApply();
+  }
+  else if (sub == "key") {
+    if (val.length() < 4 || val.indexOf(' ') >= 0) { emitMsg("ERR", "use /dapnet key <auth key>"); return; }
+    dap.key = val; if (dapOn) dapApply();
+    emitMsg("OK", "auth key set");
+  }
+  else if (sub == "server") {
+    int c = val.lastIndexOf(':');
+    String h = c > 0 ? val.substring(0, c) : val;
+    long pt = c > 0 ? val.substring(c + 1).toInt() : 43434;
+    if (!h.length() || pt <= 0 || pt > 65535) { emitMsg("ERR", "use /dapnet server host[:port]"); return; }
+    dap.host = h; dap.port = (uint16_t)pt; if (dapOn) dapApply();
+  }
+  else { emitMsg("ERR", "use /dapnet [0|1|name N|key K|server host:port]"); return; }
+  dapRev++;
+  emitCfg();
+}
+
+static void wifiCommand(String arg) {
+  if (arg == "-") { dap.ssid = ""; dap.pass = ""; }
+  else {
+    // "SSID|PASSWORD" (SSID may contain spaces), or "SSID PASSWORD" split at the last space
+    if (!arg.length()) { emitMsg("ERR", "use /wifi SSID PASSWORD (or /wifi - to clear)"); return; }
+    int sp = arg.indexOf('|');
+    if (sp < 0) sp = arg.lastIndexOf(' ');
+    if (sp > 0) { dap.ssid = arg.substring(0, sp); dap.pass = arg.substring(sp + 1); }
+    else { dap.ssid = arg; dap.pass = ""; }
+  }
+  if (dapOn) dapApply();
+  dapRev++;
+  emitMsg("OK", dap.ssid.length() ? "WiFi set" : "WiFi cleared");
+  emitCfg();
+}
+
 // ---------------- commands ----------------
 static bool splitRicText(const String& s, uint32_t& ric, String& text) {
   int sep = s.indexOf(':');
@@ -344,6 +466,10 @@ static void help() {
     "  /log            replay stored received pages   /logclear  forget them\n"
     "  /led 0|1        status LED patterns\n"
     "  /ble 0|1        Bluetooth LE console   /blepin NNNNNN   /bleforget\n"
+    "  /wifi SSID PASS WiFi for DAPNET (SSID|PASS if the SSID has spaces; /wifi - clears)\n"
+    "  /dapnet [0|1]   DAPNET transmitter link on/off; no argument = status\n"
+    "  /dapnet name N  transmitter name as registered   /dapnet key K  its auth key\n"
+    "  /dapnet server host[:port]  (default dapnet.afu.rwth-aachen.de:43434)\n"
     "  /save           store all settings in flash\n"
     "  /cfg            print configuration (@CFG line)\n"
     "  /cls            clear the OLED\n"
@@ -384,7 +510,7 @@ static void handleCommand(String cmd) {
     emitCfg();
   }
   else if (cmd == "/f") { logf("F %.5f\ncorr %+ld Hz\n", curFreq(), (long)corrHz); emitCfg(); }
-  else if (cmd == "/cfg") { emitCfg(); }
+  else if (cmd == "/cfg") { emitCfg(); emitDap(); }
   else if (cmd == "/ric" || cmd == "/mon") {
     if (cmd == "/ric") {
       if (n <= 0 || n > 2097151L) { emitMsg("ERR", "RIC must be 1..2097151"); return; }
@@ -436,6 +562,13 @@ static void handleCommand(String cmd) {
     prefs.putFloat("bw", rxBw);
     prefs.putUChar("txmax", txMax);
     prefs.putUInt("dest", lastDest);
+    prefs.putBool("dapon", dapOn);
+    prefs.putString("wssid", dap.ssid);
+    prefs.putString("wpass", dap.pass);
+    prefs.putString("daphost", dap.host);
+    prefs.putUShort("dapport", dap.port);
+    prefs.putString("dapname", dap.name);
+    prefs.putString("dapkey", dap.key);
     logf("saved\n");
     emitMsg("OK", "settings saved");
   }
@@ -487,6 +620,8 @@ static void handleCommand(String cmd) {
     emitCfg();
   }
   else if (cmd == "/autoid") { autoId = (n != 0); emitCfg(); }
+  else if (cmd == "/wifi")   { wifiCommand(arg); }
+  else if (cmd == "/dapnet") { dapCommand(arg); }
   else if (cmd == "/cls") {
     if (oledOk) { oledLog.print('\f'); oled.clearDisplay(); }
     out.println("OLED cleared");
@@ -502,6 +637,7 @@ void setup() {
   pinMode(PIN_LED, OUTPUT);
   digitalWrite(PIN_LED, LOW);
   oledInit();
+  logf("%s\n", BOARD_NAME);                 // shows which board profile was compiled in
 
   prefs.begin("pocsag", false);
   corrHz     = prefs.getInt("corrHz", DEFAULT_CORR_HZ);
@@ -515,14 +651,32 @@ void setup() {
   autoId     = prefs.getBool("autoid", true);
   rxBw       = bwNearest(prefs.getFloat("bw", BW_DEFAULT));
   lastDest   = prefs.getUInt("dest", DEFAULT_DEST);
+  dapOn      = prefs.getBool("dapon", false);
+  dap.ssid   = prefs.getString("wssid", "");
+  dap.pass   = prefs.getString("wpass", "");
+  dap.host   = prefs.getString("daphost", dap.host);
+  dap.port   = prefs.getUShort("dapport", dap.port);
+  dap.name   = prefs.getString("dapname", "");
+  dap.key    = prefs.getString("dapkey", "");
   txMax      = (uint8_t)constrain((int)prefs.getUChar("txmax", DEFAULT_TXMAX), TXMAX_MIN, TXMAX_MAX);
 
   msgLog.begin();
-  check(radio.begin(curFreq(), txPwr, rxBw, myRic, rxMask(), onPage), "radio init");
+  int16_t rs = radio.begin(curFreq(), txPwr, rxBw, myRic, rxMask(), onPage);
+#if defined(RADIO_SX126X)
+  if (rs == RADIOLIB_ERR_CHIP_NOT_FOUND) {       // show what is on the SPI bus before halting
+    char l1[20], l2[20], l3[20];
+    sx126xProbe(l1, l2, l3, sizeof l1);
+    logf("chip not found\n%s\n%s\n%s\n", l1, l2, l3);
+  }
+#endif
+  check(rs, "radio init");
 
   logf("%.4f MHz\ncorr %+ld Hz\nBW %.1f kHz\nRIC %lu%s\n", curFreq(), (long)corrHz, rxBw,
        (unsigned long)myRic, monAll ? " +mon" : "");
   if (bleEnabled) bleStart();
+  dap.onLog = [](const char* l) { logf("%s\n", l); };
+  dap.onChange = []() { dapChanged = true; };
+  if (dapOn) dap.start();
   if (!strcmp(callsign, DEFAULT_CALL)) logf("%s\nset /call!\n", callsign);
   else logf("%s\n", callsign[0] ? callsign : "no callsign");
   out.println("Send 'RIC:message' to transmit, /help for commands.");
@@ -538,6 +692,10 @@ void loop() {
   }
 
   radio.poll();
+  dap.service();
+  serviceDapTx();
+  static uint32_t dapEmitted = 0;
+  if (dapChanged && millis() - dapEmitted > 300) { dapChanged = false; dapEmitted = millis(); emitDap(); }
   serviceRssi();
   msgLog.service();
 
@@ -549,7 +707,7 @@ void loop() {
   if (ble.connected() != bleWasConnected) {
     bleWasConnected = ble.connected();
     logf(bleWasConnected ? "BLE connected\n" : "BLE disconnected\n");
-    if (bleWasConnected) emitCfg();
+    if (bleWasConnected) { emitCfg(); emitDap(); }
     else rssiUntil = 0;                         // stop streaming when the phone leaves
   }
 }

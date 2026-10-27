@@ -51,7 +51,7 @@ button,input,select{font:inherit;color:inherit}
 .side section:last-child{border-bottom:0}
 .side h2{margin:0 0 10px;font:600 1.15rem/1.2 var(--cond)}
 label{display:block;font-size:.88rem;color:var(--ink-2);margin:8px 0 3px}
-input[type=text],input[type=number],select{width:100%;padding:7px 9px;border:1px solid var(--edge);border-radius:4px;background:var(--panel-2)}
+input[type=text],input[type=number],input[type=password],select{width:100%;padding:7px 9px;border:1px solid var(--edge);border-radius:4px;background:var(--panel-2)}
 .row{display:flex;gap:8px;align-items:end}
 .row > *{flex:1}
 .row > .btn{flex:0 0 auto}
@@ -160,7 +160,7 @@ fieldset:disabled{opacity:.55}
       <h2 id="h-send">Send a page</h2>
       <form id="txForm">
         <div class="row">
-          <div><label for="txRic">RIC</label><input type="text" id="txRic" inputmode="numeric" list="ricList" autocomplete="off" required value="555555"></div>
+          <div><label for="txRic">RIC</label><input type="text" id="txRic" inputmode="numeric" list="ricList" autocomplete="off" required value="111111"></div>
           <div><label for="txKind">Type</label>
             <select id="txKind"><option value="a">Text</option><option value="n">Numeric</option><option value="t">Tone only</option></select></div>
         </div>
@@ -229,6 +229,28 @@ fieldset:disabled{opacity:.55}
             <button class="btn" type="submit">Set PIN</button>
           </form>
           <div class="row" style="margin-top:8px"><button class="btn small" id="forgetBtn" type="button">Forget paired phones</button></div>
+        </div>
+      </details>
+      <details class="diag" id="dapBox">
+        <summary><span class="diag-title">DAPNET</span><span class="diag-sum" id="dapSum">not connected</span></summary>
+        <div class="diag-body">
+          <label class="check"><input type="checkbox" id="dapIn"> Relay pages from DAPNET</label>
+          <p class="hint" id="dapState" aria-live="polite"></p>
+          <form id="wifiForm" class="row row-wrap" style="margin-top:10px">
+            <div><label for="wssidIn">WiFi network</label><input type="text" id="wssidIn" autocomplete="off" spellcheck="false"></div>
+            <div><label for="wpassIn">WiFi password</label><input type="password" id="wpassIn" autocomplete="new-password" placeholder="unchanged"></div>
+            <button class="btn" type="submit">Set WiFi</button>
+          </form>
+          <form id="dapForm" class="row row-wrap" style="margin-top:10px">
+            <div><label for="dnameIn">Transmitter name</label><input type="text" id="dnameIn" autocomplete="off" spellcheck="false" autocapitalize="none"></div>
+            <div><label for="dkeyIn">Auth key</label><input type="password" id="dkeyIn" autocomplete="new-password" placeholder="unchanged"></div>
+            <button class="btn" type="submit">Set</button>
+          </form>
+          <form id="dsrvForm" class="row" style="margin-top:10px">
+            <div><label for="dsrvIn">Server</label><input type="text" id="dsrvIn" autocomplete="off" spellcheck="false"></div>
+            <button class="btn" type="submit">Set server</button>
+          </form>
+          <p class="hint">Use the transmitter name and auth key DAPNET gave you for this transmitter, not your user login. Pages go out only in the time slots DAPNET assigns. Save settings to keep them.</p>
         </div>
       </details>
 
@@ -347,6 +369,7 @@ function renderMsgs(newId){
     const meta = document.createElement("div"); meta.className = "msg-meta";
     const parts = [
       ["dir", m.dir === "tx" ? "SENT" : "RECV"], ["", fmtTime(m.ts)], ["", "RIC " + m.ric],
+      m.via ? ["", "via " + m.via] : null,
       m.func != null ? ["", "F" + m.func] : null,
       m.rssi != null ? ["", m.rssi + " dBm"] : null,
       m.fixes ? ["", m.fixes + " corrected"] : null,
@@ -380,7 +403,7 @@ function fillRics(){
   for (const r of recentRics){ const o = document.createElement("option"); o.value = r; dl.appendChild(o); }
 }
 
-const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led, c.ble, c.call, c.autoid, c.bw, c.txmax, c.dest].join("|") : "";
+const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led, c.ble, c.call, c.autoid, c.bw, c.txmax, c.dest, c.dap, c.drev].join("|") : "";
 function renderCfg(){
   if (!cfg) return;
   $("board").textContent = cfg.board + (cfg.ble && cfg.blename ? `, Bluetooth ${cfg.blename}` : "") +
@@ -426,11 +449,40 @@ function renderCfg(){
   if (cfg.pnote) $("pwrNote").textContent = cfg.pnote;
   $("pwrMax").disabled = cfg.pwr >= cfg.pmax;
   $("pagerRic").textContent = cfg.mon ? "ALL RICS" : "RIC " + cfg.ric;
+  if (cfg.dap !== undefined){
+    $("dapIn").checked = !!cfg.dap;
+    if (document.activeElement !== $("wssidIn")) $("wssidIn").value = cfg.wssid || "";
+    $("wpassIn").placeholder = cfg.wpass ? "unchanged" : "none";
+    if (document.activeElement !== $("dnameIn")) $("dnameIn").value = cfg.dname || "";
+    $("dkeyIn").placeholder = cfg.dkey ? "unchanged" : "not set";
+    if (document.activeElement !== $("dsrvIn")) $("dsrvIn").value = cfg.dsrv || "";
+    renderDap();
+  }
   if (savedCfg === null) savedCfg = cfgKey(cfg);          // state at boot = what's in flash
   const dirty = cfgKey(cfg) !== savedCfg;
   $("dirty").classList.toggle("show", dirty);
   $("saveBtn").classList.toggle("tx", dirty);          // same amber as Transmit: "press me"
   if (!messages.length) renderMsgs();
+}
+
+/* ---------- DAPNET ---------- */
+let dapSt = null;
+function renderDap(){
+  const on = cfg && cfg.dap;
+  if (!on){
+    $("dapSum").textContent = "off";
+    const missing = cfg ? [!cfg.wssid && "WiFi", !cfg.dname && "transmitter name", !cfg.dkey && "auth key"].filter(Boolean) : [];
+    $("dapState").textContent = missing.length ? `Needs ${missing.join(", ")}.` : "Ready. Tick the box to connect.";
+    return;
+  }
+  if (!dapSt){ $("dapSum").textContent = "on"; $("dapState").textContent = ""; return; }
+  const d = dapSt;
+  $("dapSum").textContent = d.online ? `online, slots ${d.slots || "none"}` : d.state;
+  const parts = [d.online ? "Online" : d.state.charAt(0).toUpperCase() + d.state.slice(1)];
+  if (d.ip) parts.push(`WiFi ${d.ip}, ${d.wrssi} dBm`);
+  if (d.online) parts.push(d.slots ? `slots ${d.slots.split("").join(" ")}` : "no slots assigned yet");
+  parts.push(`${d.rx} received, ${d.tx} sent` + (d.q ? `, ${d.q} waiting` : "") + (d.drop ? `, ${d.drop} dropped` : ""));
+  $("dapState").textContent = parts.join(" · ");
 }
 
 /* ---------- beep (Web Audio) ---------- */
@@ -522,7 +574,14 @@ function handleLine(line){
         $("rssiBar").style.width = pct + "%";
       }
       break;
+    case "DAP":
+      dapSt = d; renderDap(); break;
     case "TX":
+      if (d.src === "dapnet"){                 // relayed for DAPNET: list it, nothing else
+        addMsg({dir:"tx", ric:d.ric, kind:d.kind, func:d.func, text:d.text, air:d.airtime, via:"DAPNET",
+                err: d.ok ? "" : (d.code === -5 ? "stopped by time limit" : "failed, code " + d.code)}, undefined, true);
+        break;
+      }
       if (txPending){ clearTimeout(txPending.timer); txPending = null; }
       setLink("on"); $("txBtn").disabled = false;
       if (cfg && d.ric) { cfg.dest = d.ric; renderCfg(); }   // board remembers it until /save
@@ -545,7 +604,9 @@ function handleLine(line){
 
 async function send(cmd){
   if (!link) { toast("Connect the board first", true); return; }
-  logLine("> " + cmd, "out");
+  // don't put secrets on screen
+  const shown = cmd.replace(/^(\/wifi [^|]*\|).+$/, "$1•••").replace(/^(\/dapnet key ).+$/i, "$1•••");
+  logLine("> " + shown, "out");
   try { await link.write(cmd + "\n"); }
   catch(e){ logLine("Send failed: " + e.message, "e"); toast("Couldn't send to the board: " + e.message, true); }
 }
@@ -669,6 +730,7 @@ async function disconnect(lost){
   $("board").textContent = "No board connected";
   $("calSum").textContent = "not connected";
   $("bleSum").textContent = "not connected";
+  dapSt = null; $("dapSum").textContent = "not connected"; $("dapState").textContent = "";
   rssiSet(false, true);
   $("saveBtn").classList.remove("tx");
   if (lost) toast(wasBle ? "Bluetooth connection lost" : "Board disconnected", true);
@@ -764,6 +826,32 @@ $("callForm").onsubmit = e => {
 };
 $("autoIdIn").onchange = () => send(`/autoid ${$("autoIdIn").checked ? 1 : 0}`);
 $("forgetBtn").onclick = () => send("/bleforget");
+$("dapIn").onchange = () => send(`/dapnet ${$("dapIn").checked ? 1 : 0}`);
+$("wifiForm").onsubmit = e => {
+  e.preventDefault();
+  const ssid = $("wssidIn").value.trim(), pass = $("wpassIn").value;
+  if (!ssid){ send("/wifi -"); return; }
+  if (/[|\r\n]/.test(ssid)){ toast("The network name can't contain |", true); return; }
+  if (!pass && cfg && cfg.wpass && ssid === cfg.wssid){ toast("Nothing changed"); return; }
+  send(`/wifi ${ssid}|${pass}`); $("wpassIn").value = "";
+};
+$("dapForm").onsubmit = async e => {
+  e.preventDefault();
+  const name = $("dnameIn").value.trim(), key = $("dkeyIn").value.trim();
+  if (name && name !== (cfg && cfg.dname)){
+    if (!/^[A-Za-z0-9\-_\/]{3,20}$/.test(name)){ toast("Transmitter name: 3 to 20 letters or digits", true); return; }
+    await send(`/dapnet name ${name}`);
+  }
+  if (key){
+    if (/\s/.test(key)){ toast("The auth key has no spaces", true); return; }
+    await send(`/dapnet key ${key}`); $("dkeyIn").value = "";
+  }
+};
+$("dsrvForm").onsubmit = e => {
+  e.preventDefault(); const v = $("dsrvIn").value.trim();
+  if (!/^[A-Za-z0-9.\-]+(:\d{1,5})?$/.test(v)){ toast("Server as host or host:port", true); return; }
+  send(`/dapnet server ${v}`);
+};
 $("pwrMax").onclick = () => { if (cfg) send(`/pwr ${cfg.pmax}`); };
 function rssiSet(on, silent){
   rssiOn = on;
@@ -790,6 +878,8 @@ $("rawForm").onsubmit = e => { e.preventDefault(); const v = $("rawIn").value.tr
 $("calib").open = store.get("pocsag.calibOpen", false);
 $("bleBox").open = store.get("pocsag.bleOpen", false);
 $("bleBox").addEventListener("toggle", () => store.set("pocsag.bleOpen", $("bleBox").open));
+$("dapBox").open = store.get("pocsag.dapOpen", false);
+$("dapBox").addEventListener("toggle", () => store.set("pocsag.dapOpen", $("dapBox").open));
 $("beepIn").checked = store.get("pocsag.beep", true);
 $("beepIn").onchange = () => { store.set("pocsag.beep", $("beepIn").checked); if ($("beepIn").checked){ unlockAudio(); pagerBeep(); } };
 $("calib").addEventListener("toggle", () => store.set("pocsag.calibOpen", $("calib").open));

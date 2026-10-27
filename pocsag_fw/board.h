@@ -1,20 +1,25 @@
 /*
-  Board profiles. The board is picked automatically from the ESP32 chip type:
-    ESP32    -> LilyGO T3 V1.6.1 (SX1278)
-    ESP32-S3 -> Heltec WiFi LoRa 32 V3 (SX1262)
-  To force one, uncomment a line below.
+  Board profiles, picked from the board selected in the Arduino IDE:
+    "TTGO LoRa32-OLED"        -> LilyGO T3 V1.6.1 (SX1278)
+    "ESP32 Dev Module"        -> ESP32 DevKit + Ebyte E22-400M30S (SX1268)
+    any ESP32-S3 board        -> Heltec WiFi LoRa 32 V3 (SX1262)
+    any other plain ESP32     -> LilyGO T3 V1.6.1
+  To force a profile regardless of the IDE board, uncomment one line below.
 */
 #pragma once
 // #define BOARD_T3_V161
 // #define BOARD_HELTEC_V3
+// #define BOARD_E22_DEVKIT
 
-#if !defined(BOARD_T3_V161) && !defined(BOARD_HELTEC_V3)
+#if !defined(BOARD_T3_V161) && !defined(BOARD_HELTEC_V3) && !defined(BOARD_E22_DEVKIT)
   #if defined(CONFIG_IDF_TARGET_ESP32S3)
     #define BOARD_HELTEC_V3
+  #elif defined(ARDUINO_ESP32_DEV)
+    #define BOARD_E22_DEVKIT
   #elif defined(CONFIG_IDF_TARGET_ESP32)
     #define BOARD_T3_V161
   #else
-    #error "Unknown board: uncomment BOARD_T3_V161 or BOARD_HELTEC_V3 in board.h"
+    #error "Unknown board: uncomment a BOARD_... line in board.h"
   #endif
 #endif
 
@@ -48,6 +53,7 @@
 #elif defined(BOARD_HELTEC_V3)
   // ---- Heltec WiFi LoRa 32 V3, ESP32-S3 + SX1262 (433/470-510 MHz variant needed)
   #define BOARD_NAME   "Heltec WiFi LoRa 32 V3 / SX1262"
+  #define RADIO_CHIP   SX1262
   #define PIN_SCK      9
   #define PIN_MISO     11
   #define PIN_MOSI     10
@@ -70,6 +76,43 @@
   #define BW_SINGLE_SIDED false
   #define BW_DEFAULT   14.6f
   static const float BW_LIST[] = { 7.3f, 9.7f, 11.7f, 14.6f, 19.5f, 23.4f, 29.3f, 39.0f, 46.9f, 58.6f };
+
+#elif defined(BOARD_E22_DEVKIT)
+  // ---- ESP32 DevKit (ESP32-WROOM-32) + Ebyte E22-400M30S (SX1268 + 1 W PA + LNA),
+  //      wired as the Meshtastic DIY "E-byte Type 1" schematic, plus one hand-wired change:
+  //      E22 DIO2 (pin 8) bridged to TXEN (pin 7), ESP32 IO13 NOT connected to TXEN.
+  //      The SX1268 then switches the PA on by itself whenever it transmits (DIO2 as RF switch);
+  //      RXEN (LNA path) is driven by RadioLib from IO14. Module VCC from +5 V, not 3.3 V.
+  #define BOARD_NAME   "ESP32 DevKit + E22-400M30S / SX1268"
+  #define RADIO_CHIP   SX1268
+  #define PIN_SCK      5
+  #define PIN_MISO     19
+  #define PIN_MOSI     27
+  #define PIN_NSS      18
+  #define PIN_RST      23
+  #define PIN_BUSY     32
+  #define PIN_DIO1     33     // IRQ
+  #define PIN_RXEN     14     // E22 RXEN; TXEN comes from DIO2
+  #define PIN_SDA      21
+  #define PIN_SCL      22
+  #define PIN_OLED_RST U8X8_PIN_NONE
+  #define PIN_VEXT     -1
+  #define PIN_LED      2      // DevKit on-board LED (no LED on the E22 schematic)
+  #define TCXO_VOLTAGE 1.8f   // E22 TCXO from DIO3; if radio init fails, try 0 (crystal)
+  #define PWR_MIN      -9
+  #define PWR_MAX      22
+  #define PWR_NOTE     "Setting is the SX1268 output; the E22 PA adds about 8 dB, so 22 gives about 1 W (30 dBm) " \
+                       "with the module on 5 V. Full power draws roughly 0.6 A and heats the module on long pages. " \
+                       "Never transmit without an antenna."
+  #define FREQ_STEP_HZ 30
+  #define BW_SINGLE_SIDED false
+  #define BW_DEFAULT   14.6f
+  static const float BW_LIST[] = { 7.3f, 9.7f, 11.7f, 14.6f, 19.5f, 23.4f, 29.3f, 39.0f, 46.9f, 58.6f };
+#endif
+
+// SX126x boards share one radio implementation (radio.h)
+#if defined(BOARD_HELTEC_V3) || defined(BOARD_E22_DEVKIT)
+  #define RADIO_SX126X
 #endif
 
 static const size_t BW_COUNT = sizeof(BW_LIST) / sizeof(BW_LIST[0]);

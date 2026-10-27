@@ -2,8 +2,8 @@
   POCSAG radio layer: same interface for both boards.
 
     SX1278 (T3)    : TX and RX with RadioLib PagerClient (RX in direct mode, DIO1 clock / DIO2 data)
-    SX1262 (Heltec): TX with PagerClient; RX via the GFSK packet engine + pocsag_rx.h decoder,
-                     because the SX126x has no direct-mode outputs.
+    SX1262 (Heltec), SX1268 (E22): TX with PagerClient; RX via the GFSK packet engine +
+                     pocsag_rx.h decoder, because the SX126x has no direct-mode outputs.
 
   TX timeout: PagerClient::transmit() blocks and can't be cancelled, so the chip class is wrapped
   in TxGuard. Once abortTx is set (from a timer), the next per-bit transmitDirect() call puts the
@@ -64,8 +64,9 @@ class PocsagRadio {
                                              int16_t r = startRx(); return s ? s : r; }
   int16_t setRxBw(float bw)                { bw_ = bw; return restartRx(); }
   float   rxBw() const                     { return bw_; }
-  // blocking page transmission; kind 'a' alpha, 'n' numeric, 't' tone
-  int16_t transmit(uint32_t ric, char kind, String& text);
+  // blocking page transmission; kind 'a' alpha, 'n' numeric, 't' tone;
+  // func = POCSAG function bits 0..3, or automatic from the kind
+  int16_t transmit(uint32_t ric, char kind, String& text, uint8_t func = RADIOLIB_PAGER_FUNC_AUTO);
   void    abortTx()                        { chip_.abortTx = true; }   // safe from a timer callback
   int16_t carrierOn();
   int16_t carrierOff()                     { return startRx(); }
@@ -103,8 +104,8 @@ class PocsagRadio {
     digitalWrite(PIN_DIO2, LOW);
     chip_.setFrequencyDeviation(-1);
   }
-#elif defined(BOARD_HELTEC_V3)
-  TxGuard<SX1262> chip_{new Module(PIN_NSS, PIN_DIO1, PIN_RST, PIN_BUSY)};
+#elif defined(RADIO_SX126X)
+  TxGuard<RADIO_CHIP> chip_{new Module(PIN_NSS, PIN_DIO1, PIN_RST, PIN_BUSY)};
   PagerClient pager_{&chip_};
   static const uint8_t RX_BATCHES = 3;    // batches per packet (max 3: 200 B <= 255 B)
   static const uint8_t SYNC_LEN   = 3;    // last 3 bytes of FSC: tolerant to the restart gap
@@ -142,13 +143,13 @@ int16_t PocsagRadio::startRx() {
   return pager_.startReceive(PIN_DIO2, ric_, mask_);
 }
 
-int16_t PocsagRadio::transmit(uint32_t ric, char kind, String& text) {
+int16_t PocsagRadio::transmit(uint32_t ric, char kind, String& text, uint8_t func) {
   prepTx();
   chip_.abortTx = false; chip_.aborted = false;
   int16_t s;
   if (kind == 't')      s = pager_.sendTone(ric);
-  else if (kind == 'n') s = pager_.transmit(text, ric, RADIOLIB_PAGER_BCD);
-  else                  s = pager_.transmit(text, ric, RADIOLIB_PAGER_ASCII);
+  else if (kind == 'n') s = pager_.transmit(text, ric, RADIOLIB_PAGER_BCD, func);
+  else                  s = pager_.transmit(text, ric, RADIOLIB_PAGER_ASCII, func);
   bool aborted = chip_.aborted;
   chip_.abortTx = false;
   startRx();
@@ -180,7 +181,46 @@ void PocsagRadio::poll() {
 }
 
 // ======================================================================================
-#elif defined(BOARD_HELTEC_V3)
+#elif defined(RADIO_SX126X)
+
+// --------------------------------------------------------------------------------------
+// Wiring check for SX126x boards, used when begin() fails with RADIOLIB_ERR_CHIP_NOT_FOUND.
+// Resets the chip by hand, waits for BUSY, reads the version string at register 0x0320 over
+// raw SPI and fills three short lines (16 chars, OLED width):
+//   l1 "BUSY r0 1 ok"    BUSY level during reset, after release, and whether it went low
+//   l2 "ver SX1268 V2D"  printable version text (dots for non-printable bytes)
+//   l3 "53 58 31 32 S80" first 4 bytes in hex + SPI status byte
+// Reading: 00 00 .. = chip unpowered or MISO held low; FF FF .. = MISO open or NSS not
+// reaching the chip; BUSY stuck at 1 = BUSY/RST wiring or no supply; other text = other chip.
+static void sx126xProbe(char* l1, char* l2, char* l3, size_t n) {
+  pinMode(PIN_NSS, OUTPUT);  digitalWrite(PIN_NSS, HIGH);
+  pinMode(PIN_BUSY, INPUT);
+  pinMode(PIN_RST, OUTPUT);  digitalWrite(PIN_RST, LOW);
+  delay(2);
+  int bRst = digitalRead(PIN_BUSY);
+  digitalWrite(PIN_RST, HIGH);
+  delay(1);
+  int bRel = digitalRead(PIN_BUSY);
+  uint32_t t0 = millis();
+  while (digitalRead(PIN_BUSY) && millis() - t0 < 200) delay(1);
+  bool ready = !digitalRead(PIN_BUSY);
+  delay(5);
+  uint8_t v[16];
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(PIN_NSS, LOW);
+  SPI.transfer(0x1D);                               // ReadRegister
+  SPI.transfer(0x03); SPI.transfer(0x20);           // address 0x0320
+  uint8_t st = SPI.transfer(0x00);                  // status byte
+  for (int i = 0; i < 16; i++) v[i] = SPI.transfer(0x00);
+  digitalWrite(PIN_NSS, HIGH);
+  SPI.endTransaction();
+  char txt[17];
+  for (int i = 0; i < 16; i++) txt[i] = (v[i] >= 0x20 && v[i] < 0x7F) ? (char)v[i] : '.';
+  txt[16] = 0;
+  snprintf(l1, n, "BUSY r%d %d %s", bRst, bRel, ready ? "ok" : "STUCK");
+  snprintf(l2, n, "%.16s", txt);
+  snprintf(l3, n, "%02X %02X %02X %02X S%02X", v[0], v[1], v[2], v[3], st);
+}
 
 volatile bool PocsagRadio::pktFlag_ = false;
 PocsagRadio*  PocsagRadio::self_ = nullptr;
@@ -191,6 +231,11 @@ int16_t PocsagRadio::begin(float freq, int8_t pwr, float bw, uint32_t ric, uint3
   freq_ = freq; bw_ = bw; ric_ = ric; mask_ = mask; cb_ = cb; pwr_ = pwr; self_ = this;
   SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_NSS);
   chip_.tcxoVoltage = TCXO_VOLTAGE;
+#if defined(PIN_RXEN)
+  // external RX switch / LNA enable: RadioLib raises it in RX and drops it in TX and standby.
+  // TX side of the switch is DIO2 (setDio2AsRfSwitch below).
+  chip_.setRfSwitchPins(PIN_RXEN, RADIOLIB_NC);
+#endif
   ConfigFSK_t c;
   c.frequency = freq;
   c.bitRate = POCSAG_BAUD / 1000.0f;
@@ -228,13 +273,13 @@ int16_t PocsagRadio::startRx() {
   return chip_.startReceive();                     // RX continuous
 }
 
-int16_t PocsagRadio::transmit(uint32_t ric, char kind, String& text) {
+int16_t PocsagRadio::transmit(uint32_t ric, char kind, String& text, uint8_t func) {
   prepTx();
   chip_.abortTx = false; chip_.aborted = false;
   int16_t s;
   if (kind == 't')      s = pager_.sendTone(ric);
-  else if (kind == 'n') s = pager_.transmit(text, ric, RADIOLIB_PAGER_BCD);
-  else                  s = pager_.transmit(text, ric, RADIOLIB_PAGER_ASCII);
+  else if (kind == 'n') s = pager_.transmit(text, ric, RADIOLIB_PAGER_BCD, func);
+  else                  s = pager_.transmit(text, ric, RADIOLIB_PAGER_ASCII, func);
   bool aborted = chip_.aborted;
   chip_.abortTx = false;
   chip_.standby();
@@ -301,7 +346,7 @@ int16_t PocsagRadio::calEnter(float freq) {
   c.power = pwr_;
   c.preambleLength = 8;
   int16_t s = chip_.begin(c);
-#if defined(BOARD_HELTEC_V3)
+#if defined(RADIO_SX126X)
   if (!s) s = chip_.setDio2AsRfSwitch(true);
 #endif
   return s;
