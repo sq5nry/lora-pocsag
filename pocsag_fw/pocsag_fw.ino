@@ -2,9 +2,9 @@
   lora-pocsag firmware: POCSAG pager transmitter/receiver on 70 cm with LoRa boards.
 
   One sketch for all boards; the profile follows the board chosen in the Arduino IDE (board.h):
-    LilyGO T3 V1.6.1      (ESP32    + SX1278)  Arduino board: "TTGO LoRa32-OLED"
+    LilyGO T3 V1.6.1      (ESP32    + SX1278)  Arduino board: "ESP32 PICO-D4", Partition: Minimal SPIFFS
     Heltec WiFi LoRa 32 V3 (ESP32-S3 + SX1262) Arduino board: "Heltec WiFi LoRa 32(V3)"
-    ESP32 DevKit + Ebyte E22-400M30S (SX1268)  Arduino board: "ESP32 Dev Module"
+    ESP32 DevKit + Ebyte E22-400M30S (SX1268)  Arduino board: "ESP32 Dev Module", Partition: Minimal SPIFFS
 
   Libraries (Library Manager): RadioLib, U8g2, NimBLE-Arduino (2.x)
 
@@ -13,10 +13,14 @@
   Lines starting with '@' are JSON events for the web console:
     @CFG config   @RX received page   @TX transmit result   @CW carrier on/off
     @RSSI live signal level   @LOGEND end of /log replay   @CAL board-to-board tuning   @OK / @ERR
-    @DAP DAPNET link status
+    @DAP DAPNET link status   @NET WiFi / access point / web console status
 
   DAPNET: with WiFi networks known (/wifi add) and a registered transmitter (/dapnet name, /dapnet key), /dapnet 1
   logs the board into the DAPNET core; pages routed to it go out in its assigned time slots.
+
+  Web console: /web pass <password> and /web 1 serve the console from the board itself
+  (http://<board address>/, login /web user + password); with no known WiFi in range the board
+  opens its own network (name = Bluetooth name, password = web password) at 192.168.4.1.
 */
 
 #include <Wire.h>
@@ -28,7 +32,9 @@
 #include "radio.h"
 #include "msg_log.h"
 #include "ble_link.h"
+#include "wifi_link.h"
 #include "dapnet.h"
+#include "web_console.h"
 
 // ---------------- defaults (used until changed at runtime and stored with /save) ----------------
 static const float    FREQ_MHZ        = 439.9875;   // DAPNET channel
@@ -38,6 +44,7 @@ static const bool     DEFAULT_MON     = false;      // true = show pages for eve
 static const int8_t   DEFAULT_PWR     = 10;         // dBm
 static const bool     DEFAULT_LED     = true;
 static const bool     DEFAULT_BLE     = true;
+static const bool     DEFAULT_WEB     = true;       // web console on; password per board, on the display
 static const char*    DEFAULT_CALL    = "XX9YYY";   // placeholder until set with /call
 static const uint8_t  DEFAULT_TXMAX   = 10;         // s, transmit time limit
 static const uint32_t DEFAULT_DEST    = 123456;     // destination RIC offered in the web console
@@ -57,15 +64,28 @@ static float    rxBw       = BW_DEFAULT;
 static uint8_t  txMax      = DEFAULT_TXMAX;
 static uint32_t lastDest   = DEFAULT_DEST;          // last RIC a page was sent to, kept by /save
 static bool     dapOn      = false;                 // DAPNET transmitter link
+static bool     webOn      = DEFAULT_WEB;           // web console served by the board
+static bool     webAp      = true;                  // own access point when no known WiFi
 
 static Preferences prefs;
 static PocsagRadio radio;
 static MsgLog      msgLog;
 BleLink ble;
 DualOut out(ble);                                   // USB serial + paired BLE phone
-static Dapnet dap;
-static volatile bool dapChanged = false;
+static WifiLink   wifi;
+static Dapnet     dap(wifi);
+static WebConsole web;
+static bool webLoginPending = false;                // default web login still to show on the OLED
+static volatile bool dapChanged = false;            // DAPNET / WiFi / web status changed
 static uint16_t dapRev = 0;                        // bumped on every DAPNET/WiFi setting change
+
+// per-board web password (8 digits, from the chip ID; differs from the Bluetooth PIN), until changed
+static String defaultWebPass() {
+  uint64_t mac = ESP.getEfuseMac();
+  uint32_t h = (uint32_t)(mac ^ (mac >> 29)) * 2654435761UL;
+  char b[12]; snprintf(b, sizeof b, "%08lu", (unsigned long)(10000000UL + h % 90000000UL));
+  return String(b);
+}
 
 static inline float curFreq() { return FREQ_MHZ + corrHz / 1e6f; }
 static inline uint32_t rxMask() { return monAll ? 0 : 0x1FFFFF; }
@@ -172,6 +192,20 @@ static void warnIf(int16_t st, const char* what) {
   }
 }
 
+// Fingerprint of everything /save stores: lets every connected console (USB, Bluetooth, WiFi)
+// show the same "unsaved changes" state, whoever made the change.
+static uint32_t savedKey = 0;
+static uint32_t settingsKey() {
+  String k = String(corrHz) + '|' + myRic + '|' + monAll + '|' + txPwr + '|' + ledEnabled + '|' + bleEnabled + '|' +
+             blePin + '|' + callsign + '|' + autoId + '|' + String(rxBw, 1) + '|' + txMax + '|' + lastDest + '|' +
+             dapOn + '|' + dap.host + '|' + dap.port + '|' + dap.name + '|' + dap.key + '|' +
+             webOn + '|' + webAp + '|' + web.user + '|' + web.pass;
+  for (uint8_t i = 0; i < wifi.netCount; i++) k += '|' + wifi.nets[i].ssid + '\x01' + wifi.nets[i].pass;
+  uint32_t h = 2166136261UL;                               // FNV-1a
+  for (size_t i = 0; i < k.length(); i++) { h ^= (uint8_t)k[i]; h *= 16777619UL; }
+  return h;
+}
+
 static void emitCfg() {
   String bws = "[";
   for (size_t i = 0; i < BW_COUNT; i++) { if (i) bws += ','; bws += String(BW_LIST[i], 1); }
@@ -189,12 +223,19 @@ static void emitCfg() {
     rxBw, BW_SINGLE_SIDED ? "true" : "false", txMax, TXMAX_MIN, TXMAX_MAX, MsgLog::LOG_N,
     (unsigned long)lastDest);
   String d = ",\"dap\":" + String(dapOn ? "true" : "false") + ",\"wnets\":[";
-  for (uint8_t i = 0; i < dap.netCount; i++) {          // passwords never leave the board
+  for (uint8_t i = 0; i < wifi.netCount; i++) {          // passwords never leave the board
     if (i) d += ',';
-    d += "{\"ssid\":"; jsonStr(d, dap.nets[i].ssid.c_str());
-    d += ",\"pass\":" + String(dap.nets[i].pass.length() ? "true" : "false") + "}";
+    d += "{\"ssid\":"; jsonStr(d, wifi.nets[i].ssid.c_str());
+    d += ",\"pass\":" + String(wifi.nets[i].pass.length() ? "true" : "false") + "}";
   }
-  d += "],\"wmax\":" + String(Dapnet::MAX_NETS) + ",\"dsrv\":";
+  d += "],\"wmax\":" + String(WifiLink::MAX_NETS);
+  d += ",\"web\":" + String(webOn ? "true" : "false") + ",\"webuser\":";
+  jsonStr(d, web.user.c_str());
+  d += ",\"webpass\":" + String(web.ready() ? "true" : "false") + ",\"webap\":" + String(webAp ? "true" : "false");
+  d += ",\"webdef\":" + String(web.pass == defaultWebPass() ? "true" : "false");
+  d += ",\"unsaved\":" + String(settingsKey() != savedKey ? "true" : "false") + ",\"up\":" + String(millis() / 1000);
+  d += ",\"apname\":"; jsonStr(d, BleLink::defaultName().c_str());
+  d += ",\"dsrv\":";
   jsonStr(d, (dap.host + ":" + String(dap.port)).c_str());
   d += ",\"dname\":";
   jsonStr(d, dap.name.c_str());
@@ -374,16 +415,45 @@ static void emitDap() {
              ",\"slots\":\"" + dap.slotText() + "\",\"slot\":" + String(slot) +
              ",\"q\":" + String(dap.queued()) + ",\"rx\":" + String(dap.rxCount) +
              ",\"tx\":" + String(dap.txCount) + ",\"drop\":" + String(dap.dropCount);
-  String ws = dap.wifiSsid();
-  if (ws.length()) { j += ",\"ssid\":"; jsonStr(j, ws.c_str()); }
-  if (dap.wifiSearching()) j += ",\"scan\":true";
-  if (WiFi.status() == WL_CONNECTED)
-    j += ",\"ip\":\"" + WiFi.localIP().toString() + "\",\"wrssi\":" + String(WiFi.RSSI());
   j += "}";
   emitEvt("DAP", j);
 }
 
+// WiFi station, own access point and web console
+static void emitNet() {
+  String j = "{\"on\":" + String(wifi.active() ? "true" : "false");
+  String ws = wifi.ssid();
+  if (ws.length()) { j += ",\"ssid\":"; jsonStr(j, ws.c_str()); }
+  if (wifi.searching()) j += ",\"scan\":true";
+  if (wifi.up()) j += ",\"ip\":\"" + WiFi.localIP().toString() + "\",\"wrssi\":" + String(WiFi.RSSI());
+  if (wifi.apOn()) j += ",\"ap\":true,\"apip\":\"" + WiFi.softAPIP().toString() + "\",\"apn\":" + String(wifi.apClients());
+  if (wifi.asleep()) j += ",\"sleep\":true";
+  j += ",\"web\":" + String(web.running() ? "true" : "false") + ",\"webn\":" + String(web.clients()) + "}";
+  emitEvt("NET", j);
+}
+
+// WiFi and web console on/off after a settings change (DAPNET or the web console needs WiFi)
+static void netApply() {
+  wifi.apName = BleLink::defaultName();
+  wifi.apPass = web.pass;
+  wifi.apEnabled = webOn && webAp && web.ready();
+  // WiFi when DAPNET needs it, or for the web console if there's a network to join or the board's
+  // own network may open (WifiLink switches the radio off again when that window passes unused)
+  bool forWeb = webOn && web.ready() && (wifi.netCount || wifi.apEnabled);
+  if (dapOn || forWeb) wifi.start(); else wifi.stop();
+  wifi.reconsider();
+  if (webOn && web.ready() && wifi.active()) {
+    if (!web.running()) {
+      if (web.begin()) logf("web on, port 80\n");
+      else logf("web start failed\n%s\n", esp_err_to_name(web.lastError()));
+    }
+  }
+  else web.end();
+  dapChanged = true;
+}
+
 static void dapApply() {                       // (re)start or stop after a settings change
+  netApply();
   if (dapOn) dap.start(); else dap.stop();
   dapChanged = true;
 }
@@ -426,11 +496,11 @@ static void dapCommand(String arg) {
   }
   else if (sub == "name") {
     if (val.length() < 3 || val.length() > 20) { emitMsg("ERR", "use /dapnet name <transmitter name>"); return; }
-    val.toLowerCase(); dap.name = val; if (dapOn) dapApply();
+    val.toLowerCase(); dap.name = val; if (dapOn) dap.start();
   }
   else if (sub == "key") {
     if (val.length() < 4 || val.indexOf(' ') >= 0) { emitMsg("ERR", "use /dapnet key <auth key>"); return; }
-    dap.key = val; if (dapOn) dapApply();
+    dap.key = val; if (dapOn) dap.start();
     emitMsg("OK", "auth key set");
   }
   else if (sub == "server") {
@@ -438,7 +508,7 @@ static void dapCommand(String arg) {
     String h = c > 0 ? val.substring(0, c) : val;
     long pt = c > 0 ? val.substring(c + 1).toInt() : 43434;
     if (!h.length() || pt <= 0 || pt > 65535) { emitMsg("ERR", "use /dapnet server host[:port]"); return; }
-    dap.host = h; dap.port = (uint16_t)pt; if (dapOn) dapApply();
+    dap.host = h; dap.port = (uint16_t)pt; if (dapOn) dap.start();
   }
   else { emitMsg("ERR", "use /dapnet [0|1|name N|key K|server host:port]"); return; }
   dapRev++;
@@ -450,9 +520,9 @@ static void dapCommand(String arg) {
 // /wifi del SSID         forget one (or its number from the list)
 // /wifi clear            forget all (also: /wifi -)
 static void wifiList() {
-  if (!dap.netCount) { logf("WiFi: none\n"); return; }
-  for (uint8_t i = 0; i < dap.netCount; i++)
-    out.printf("  %u  %s%s\n", i + 1, dap.nets[i].ssid.c_str(), dap.nets[i].pass.length() ? "" : "  (open)");
+  if (!wifi.netCount) { logf("WiFi: none\n"); return; }
+  for (uint8_t i = 0; i < wifi.netCount; i++)
+    out.printf("  %u  %s%s\n", i + 1, wifi.nets[i].ssid.c_str(), wifi.nets[i].pass.length() ? "" : "  (open)");
 }
 static void wifiCommand(String arg) {
   String sub = arg, val;
@@ -461,12 +531,12 @@ static void wifiCommand(String arg) {
   String lsub = sub; lsub.toLowerCase();
   if (!arg.length()) { wifiList(); emitCfg(); return; }
   if (arg == "-" || lsub == "clear") {
-    dap.clearNets();
+    wifi.clearNets();
     emitMsg("OK", "all WiFi networks forgotten");
   } else if (lsub == "del" || lsub == "rm") {
-    int8_t i = dap.findNet(val);
+    int8_t i = wifi.findNet(val);
     if (i < 0 && val.length() && val.length() <= 2 && isdigit((unsigned char)val[0])) i = (int8_t)(val.toInt() - 1);
-    if (i < 0 || !dap.removeNet((uint8_t)i)) { emitMsg("ERR", "no such WiFi network (see /wifi)"); return; }
+    if (i < 0 || !wifi.removeNet((uint8_t)i)) { emitMsg("ERR", "no such WiFi network (see /wifi)"); return; }
     emitMsg("OK", "WiFi network forgotten");
   } else {
     String e = (lsub == "add") ? val : arg;          // "/wifi SSID|PASS" still works
@@ -475,16 +545,62 @@ static void wifiCommand(String arg) {
     if (k < 0) k = e.lastIndexOf(' ');
     String ss = k > 0 ? e.substring(0, k) : e, pw = k > 0 ? e.substring(k + 1) : String();
     if (!ss.length() || ss.length() > 32 || pw.length() > 63) { emitMsg("ERR", "use /wifi add SSID|PASSWORD"); return; }
-    bool known = dap.findNet(ss) >= 0;
-    if (!dap.addNet(ss, pw)) {
-      char m[64]; snprintf(m, sizeof m, "WiFi list full (%u networks), remove one first", Dapnet::MAX_NETS);
+    bool known = wifi.findNet(ss) >= 0;
+    if (!wifi.addNet(ss, pw)) {
+      char m[64]; snprintf(m, sizeof m, "WiFi list full (%u networks), remove one first", WifiLink::MAX_NETS);
       emitMsg("ERR", m); return;
     }
     emitMsg("OK", known ? "WiFi password changed" : "WiFi network added");
   }
-  if (dapOn) dapApply();
+  netApply();
+  if (dapOn) dap.start();                      // configured() depends on the network list
   dapRev++;
   emitCfg();
+}
+
+// /web               status and address
+// /web 0|1           web console on/off
+// /web user NAME     login name (default admin)
+// /web pass PASS     login password, 8..63 characters; also the board's own WiFi password
+// /web ap 0|1        open the board's own WiFi when no known network is in range
+static void webStatus() {
+  if (!webOn) { logf("web off (/web 1)\n"); return; }
+  if (!web.ready()) { logf("web: no password\n(/web pass ...)\n"); return; }
+  if (!web.running()) { logf("web NOT running\n%s\n", esp_err_to_name(web.lastError())); return; }
+  if (wifi.up()) logf("web http://%s/\n", WiFi.localIP().toString().c_str());
+  if (wifi.apOn()) logf("AP %s\nweb http://%s/\n", BleLink::defaultName().c_str(), WiFi.softAPIP().toString().c_str());
+  if (wifi.asleep()) logf("WiFi off: no network\nto join, own WiFi\nunused (/web ap 1)\n");
+  else if (!wifi.up() && !wifi.apOn()) logf("web: no WiFi yet\n");
+  if (web.pass == defaultWebPass()) logf("login %s\npw %s\n", web.user.c_str(), web.pass.c_str());
+}
+static void webCommand(String arg) {
+  String sub = arg, val;
+  int sp = arg.indexOf(' ');
+  if (sp > 0) { sub = arg.substring(0, sp); val = arg.substring(sp + 1); val.trim(); }
+  sub.toLowerCase();
+  if (sub == "") { webStatus(); emitNet(); return; }
+  if (sub == "1" || sub == "on" || sub == "0" || sub == "off") {
+    webOn = (sub == "1" || sub == "on");
+    if (webOn && !web.ready()) emitMsg("ERR", "set a password first: /web pass <8 to 63 characters>");
+  }
+  else if (sub == "user") {
+    bool ok = val.length() >= 1 && val.length() <= 32 && val.indexOf(':') < 0 && val.indexOf(' ') < 0;
+    if (!ok) { emitMsg("ERR", "use /web user <name> (no spaces or colons)"); return; }
+    web.end(); web.user = val;
+    emitMsg("OK", "web login name changed");
+  }
+  else if (sub == "pass") {
+    if (val == "-") val = defaultWebPass();         // back to the board's own password (on the display)
+    if (val.length() < 8 || val.length() > 63) { emitMsg("ERR", "the password needs 8 to 63 characters"); return; }
+    web.end(); web.pass = val;
+    emitMsg("OK", val == defaultWebPass() ? "web password back to the board's default" : "web password set");
+  }
+  else if (sub == "ap") { webAp = (val.toInt() != 0); }      // also reopens a timed-out access point
+  else { emitMsg("ERR", "use /web [0|1|user NAME|pass PASSWORD|ap 0|1]"); return; }
+  netApply();
+  dapRev++;
+  emitCfg();
+  webStatus();
 }
 
 // ---------------- commands ----------------
@@ -524,6 +640,10 @@ static void help() {
     "  /dapnet [0|1]   DAPNET transmitter link on/off; no argument = status\n"
     "  /dapnet name N  transmitter name as registered   /dapnet key K  its auth key\n"
     "  /dapnet server host[:port]  (default dapnet.afu.rwth-aachen.de:43434)\n"
+    "  /web [0|1]      web console served by the board; no argument = address\n"
+    "  /web user N  /web pass P   its login (password 8..63, also the board's own WiFi password;\n"
+    "                  /web pass - = the board's default, shown on the display at start)\n"
+    "  /web ap 0|1     open the board's own WiFi when no known network is in range\n"
     "  /save           store all settings in flash\n"
     "  /cfg            print configuration (@CFG line)\n"
     "  /cls            clear the OLED\n"
@@ -564,7 +684,7 @@ static void handleCommand(String cmd) {
     emitCfg();
   }
   else if (cmd == "/f") { logf("F %.5f\ncorr %+ld Hz\n", curFreq(), (long)corrHz); emitCfg(); }
-  else if (cmd == "/cfg") { emitCfg(); emitDap(); }
+  else if (cmd == "/cfg") { emitCfg(); emitDap(); emitNet(); }
   else if (cmd == "/ric" || cmd == "/mon") {
     if (cmd == "/ric") {
       if (n <= 0 || n > 2097151L) { emitMsg("ERR", "RIC must be 1..2097151"); return; }
@@ -617,10 +737,14 @@ static void handleCommand(String cmd) {
     prefs.putUChar("txmax", txMax);
     prefs.putUInt("dest", lastDest);
     prefs.putBool("dapon", dapOn);
-    prefs.putUChar("wn", dap.netCount);
-    for (uint8_t i = 0; i < Dapnet::MAX_NETS; i++) {
+    prefs.putBool("webon", webOn);
+    prefs.putBool("webap", webAp);
+    prefs.putString("webuser", web.user);
+    prefs.putString("webpass", web.pass);
+    prefs.putUChar("wn", wifi.netCount);
+    for (uint8_t i = 0; i < WifiLink::MAX_NETS; i++) {
       char ks[6], kp[6]; snprintf(ks, sizeof ks, "ws%u", i); snprintf(kp, sizeof kp, "wp%u", i);
-      if (i < dap.netCount) { prefs.putString(ks, dap.nets[i].ssid); prefs.putString(kp, dap.nets[i].pass); }
+      if (i < wifi.netCount) { prefs.putString(ks, wifi.nets[i].ssid); prefs.putString(kp, wifi.nets[i].pass); }
       else if (prefs.isKey(ks)) { prefs.remove(ks); prefs.remove(kp); }
     }
     if (prefs.isKey("wssid")) { prefs.remove("wssid"); prefs.remove("wpass"); }   // old single-network keys
@@ -628,6 +752,7 @@ static void handleCommand(String cmd) {
     prefs.putUShort("dapport", dap.port);
     prefs.putString("dapname", dap.name);
     prefs.putString("dapkey", dap.key);
+    savedKey = settingsKey();
     logf("saved\n");
     emitMsg("OK", "settings saved");
   }
@@ -681,6 +806,7 @@ static void handleCommand(String cmd) {
   else if (cmd == "/autoid") { autoId = (n != 0); emitCfg(); }
   else if (cmd == "/wifi")   { wifiCommand(arg); }
   else if (cmd == "/dapnet") { dapCommand(arg); }
+  else if (cmd == "/web")    { webCommand(arg); }
   else if (cmd == "/cls") {
     if (oledOk) { oledLog.print('\f'); oled.clearDisplay(); }
     out.println("OLED cleared");
@@ -711,14 +837,19 @@ void setup() {
   rxBw       = bwNearest(prefs.getFloat("bw", BW_DEFAULT));
   lastDest   = prefs.getUInt("dest", DEFAULT_DEST);
   dapOn      = prefs.getBool("dapon", false);
+  webOn      = prefs.getBool("webon", DEFAULT_WEB);
+  webAp      = prefs.getBool("webap", true);
+  web.user   = prefs.getString("webuser", "admin");
+  web.pass   = prefs.getString("webpass", defaultWebPass());
+  if (web.pass.length() < 8) web.pass = defaultWebPass();
   {
     uint8_t wn = prefs.getUChar("wn", 0);
-    for (uint8_t i = 0; i < wn && i < Dapnet::MAX_NETS; i++) {
+    for (uint8_t i = 0; i < wn && i < WifiLink::MAX_NETS; i++) {
       char ks[6], kp[6]; snprintf(ks, sizeof ks, "ws%u", i); snprintf(kp, sizeof kp, "wp%u", i);
-      dap.addNet(prefs.getString(ks, ""), prefs.getString(kp, ""));
+      wifi.addNet(prefs.getString(ks, ""), prefs.getString(kp, ""));
     }
     String old = prefs.getString("wssid", "");      // settings saved by the single-network version
-    if (old.length()) dap.addNet(old, prefs.getString("wpass", ""));
+    if (old.length()) wifi.addNet(old, prefs.getString("wpass", ""));
   }
   dap.host   = prefs.getString("daphost", dap.host);
   dap.port   = prefs.getUShort("dapport", dap.port);
@@ -726,6 +857,7 @@ void setup() {
   dap.key    = prefs.getString("dapkey", "");
   txMax      = (uint8_t)constrain((int)prefs.getUChar("txmax", DEFAULT_TXMAX), TXMAX_MIN, TXMAX_MAX);
 
+  savedKey = settingsKey();               // what's in flash now (defaults count as saved)
   msgLog.begin();
   int16_t rs = radio.begin(curFreq(), txPwr, rxBw, myRic, rxMask(), onPage);
 #if defined(RADIO_SX126X)
@@ -742,7 +874,14 @@ void setup() {
   if (bleEnabled) bleStart();
   dap.onLog = [](const char* l) { logf("%s\n", l); };
   dap.onChange = []() { dapChanged = true; };
-  if (dapOn) dap.start();
+  wifi.onLog = [](const char* l) {
+    logf("%s\n", l);
+    if (!strncmp(l, "IP ", 3) && web.running()) logf("web http://%s/\n", l + 3);
+  };
+  wifi.onChange = []() { dapChanged = true; };
+  out.lineSink = [](const char* s, size_t n) { web.sendText(s, n); };
+  dapApply();
+  webLoginPending = webOn && web.pass == defaultWebPass();   // shown once the start-up messages are done
   if (!strcmp(callsign, DEFAULT_CALL)) logf("%s\nset /call!\n", callsign);
   else logf("%s\n", callsign[0] ? callsign : "no callsign");
   out.println("Send 'RIC:message' to transmit, /help for commands.");
@@ -758,23 +897,43 @@ void loop() {
   }
 
   radio.poll();
+  wifi.service();
   dap.service();
   serviceDapTx();
   static uint32_t dapEmitted = 0;
-  if (dapChanged && millis() - dapEmitted > 300) { dapChanged = false; dapEmitted = millis(); emitDap(); }
+  if (dapChanged && millis() - dapEmitted > 300) { dapChanged = false; dapEmitted = millis(); emitDap(); emitNet(); }
   serviceRssi();
   serviceFlash();
+  // Default web login on the OLED, after the start-up network lines (WiFi, IP, DAPNET slots) so
+  // they don't scroll it away; at the latest 90 s after start.
+  if (webLoginPending) {
+    bool settled = dapOn ? dap.haveSlots() : (wifi.up() || wifi.apOn() || wifi.asleep() || !wifi.active());
+    if (settled || millis() > 90000UL) {
+      webLoginPending = false;
+      if (wifi.up()) logf("web %s\n", WiFi.localIP().toString().c_str());
+      else if (wifi.apOn()) logf("web %s\n", WiFi.softAPIP().toString().c_str());
+      logf("login %s\npw %s\n", web.user.c_str(), web.pass.c_str());
+    }
+  }
   msgLog.service();
 
   if (Serial.available()) processLine(Serial.readStringUntil('\n'));
 
   String bl;
   if (ble.readLine(bl)) processLine(bl);
+  if (web.readLine(bl)) processLine(bl);
+  static uint8_t webClients = 0;                // browser joined: send it the configuration
+  if (web.clients() != webClients) {
+    bool more = web.clients() > webClients;
+    webClients = web.clients();
+    dapChanged = true;
+    if (more) { emitCfg(); emitDap(); emitNet(); }
+  }
   static bool bleWasConnected = false;
   if (ble.connected() != bleWasConnected) {
     bleWasConnected = ble.connected();
     logf(bleWasConnected ? "BLE connected\n" : "BLE disconnected\n");
-    if (bleWasConnected) { emitCfg(); emitDap(); }
+    if (bleWasConnected) { emitCfg(); emitDap(); emitNet(); }
     else rssiUntil = 0;                         // stop streaming when the phone leaves
   }
 }

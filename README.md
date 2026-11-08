@@ -9,21 +9,34 @@ On iPhone and iPad, Safari and every other browser lack Web Bluetooth and Web Se
 [Bluefy – Web BLE Browser](https://apps.apple.com/app/id1492822055) from the App Store instead:
 open the console link in Bluefy, tap *Connect Bluetooth*, and enter the PIN from the board's
 display when iOS asks to pair. USB doesn't work on iOS. On a Mac, Chrome or Edge work as on any
-desktop.
+desktop. Or let the board serve the console itself over WiFi (see *Web console on the board*),
+which works in any browser.
 
 ![Web console: pager-style message list with send, frequency and receiver controls](media/ui.png)
 
 ## Firmware
 
 One Arduino sketch, `pocsag_fw/`, for both boards (and a home-made E22 board, see below). The
-board profile follows the board chosen in the Arduino IDE: *TTGO LoRa32-OLED* → LilyGO T3 V1.6.1
+board profile follows the board chosen in the Arduino IDE: *ESP32 PICO-D4* → LilyGO T3 V1.6.1
 (SX1278), *Heltec WiFi LoRa 32(V3)* → Heltec V3 (SX1262), *ESP32 Dev Module* → ESP32 DevKit + E22
 (SX1268). To force one, uncomment its line at the top of `pocsag_fw/board.h`. The board name is
 shown on the display and serial at start-up.
 
 1. Arduino IDE with the **esp32 by Espressif** board package.
 2. Libraries from the Library Manager: **RadioLib**, **U8g2**, **NimBLE-Arduino** (2.x).
-3. Board: *TTGO LoRa32-OLED* for the T3, *Heltec WiFi LoRa 32(V3)* for the Heltec, *ESP32 Dev Module* for the E22.
+3. Board and partition scheme (the firmware with WiFi, web console and Bluetooth is about 1.4 MB,
+   more than the default 1.25 MB app partition of 4 MB boards):
+
+   | Board | *Tools → Board* | *Tools → Partition Scheme* |
+   |---|---|---|
+   | LilyGO T3 V1.6.1 | *ESP32 PICO-D4* | *Minimal SPIFFS (Large APPS with OTA)* |
+   | Heltec WiFi LoRa 32 V3 | *Heltec WiFi LoRa 32(V3)* | default (8 MB flash, enough space) |
+   | ESP32 DevKit + E22 | *ESP32 Dev Module* | *Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)* |
+
+   *TTGO LoRa32-OLED* also selects the T3 profile, but that board entry has no Partition Scheme
+   menu, so the firmware no longer fits ("Sketch too big"). The T3 V1.6.1 is an ESP32-PICO-D4,
+   so *ESP32 PICO-D4* is the right entry anyway. Stored settings survive the switch (the settings
+   area is at the same place in both layouts).
    If uploads fail, lower the upload speed to 460800 or 115200.
 4. Open `pocsag_fw/pocsag_fw.ino` and upload.
 
@@ -102,12 +115,40 @@ from NTP). Local pages from the console still go out at once.
 
 Pages longer than the transmit time limit (`/txmax`) are dropped, and DAPNET time broadcasts
 older than 15 s are skipped, as DAPNETGateway does. If the T3 or E22 build is too big for flash
-with WiFi and Bluetooth together, pick *Tools → Partition Scheme → Minimal SPIFFS* (or *Huge APP*).
+with WiFi, the web console and Bluetooth together, see the board table above (*Minimal SPIFFS*).
 
 A transmitter that others use is still your station: it has to run under your licence and the
 rules for your country. In Poland a small home hotspot is usually run under the personal licence;
 a wide-area transmitter left unattended (e.g. the 1 W E22 on a mast) normally needs its own UKE
 permit for an unattended station. Check before going on air.
+
+### Web console on the board
+
+The board also serves the console itself: open `http://<board address>/` in any browser (Safari on
+an iPhone included), log in, and the page talks to the board over WiFi. It is on by default:
+
+- **Login:** `admin` and an 8-digit password of its own for each board, shown on the display at
+  start (like the Bluetooth PIN) and by `/web`. Change them in *Board → Web console*, or with
+  `/web user <name>` and `/web pass <8 to 63 characters>` (`/web pass -` goes back to the board's
+  own), then `/save`. `/web 0` turns the web console off.
+- **At home:** the board joins one of its known WiFi networks (*Board → WiFi*, or
+  `/wifi add`). `/web` prints the address; the display shows it too.
+- **Without a known network:** the board opens its own WiFi, at start if it knows no networks,
+  otherwise after 45 s without one. The network has the board's Bluetooth name (`POCSAG-xxxx`),
+  its password is the web password, and the console is at `http://192.168.4.1/`. While a phone is
+  connected the board stops looking for other networks; back on a known network and with nobody
+  connected, it closes its own. If nobody connects within 10 minutes it closes it too, to save
+  the battery, and with no known networks it turns WiFi off; the next start, or `/web ap 1`, opens
+  it again. `/web ap 0` never opens it.
+
+Notes:
+
+- The page from the board uses plain HTTP, so the password crosses the network unencrypted: fine
+  at home or on the board's own WiFi, not on public networks.
+- Browsers allow USB and Bluetooth only on HTTPS pages, so the page from the board can't offer
+  them; use the GitHub Pages console for those.
+- The page is built into the firmware. After changing `webui/pocsag_console.html`, run
+  `python3 tools/make_web_page.py` to update `pocsag_fw/web_page.h`, then rebuild.
 
 ### Matching the frequency of two boards
 

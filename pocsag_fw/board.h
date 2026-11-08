@@ -1,6 +1,9 @@
 /*
   Board profiles, picked from the board selected in the Arduino IDE:
-    "TTGO LoRa32-OLED"        -> LilyGO T3 V1.6.1 (SX1278)
+    "ESP32 PICO-D4"           -> LilyGO T3 V1.6.1 (SX1278)  (recommended for the T3: it has the
+                                 Partition Scheme menu; pick "Minimal SPIFFS")
+    "TTGO LoRa32-OLED"        -> LilyGO T3 V1.6.1 (SX1278)  (no Partition Scheme menu: the
+                                 firmware with WiFi + web console + Bluetooth no longer fits)
     "ESP32 Dev Module"        -> ESP32 DevKit + Ebyte E22-400M30S (SX1268)
     any ESP32-S3 board        -> Heltec WiFi LoRa 32 V3 (SX1262)
     any other plain ESP32     -> LilyGO T3 V1.6.1
@@ -16,6 +19,8 @@
     #define BOARD_HELTEC_V3
   #elif defined(ARDUINO_ESP32_DEV)
     #define BOARD_E22_DEVKIT
+  #elif defined(ARDUINO_ESP32_PICO)
+    #define BOARD_T3_V161
   #elif defined(CONFIG_IDF_TARGET_ESP32)
     #define BOARD_T3_V161
   #else

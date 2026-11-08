@@ -158,8 +158,21 @@ class BleLink {
 class DualOut : public Print {
  public:
   explicit DualOut(BleLink& b) : ble_(b) {}
-  size_t write(uint8_t c) override { Serial.write(c); ble_.write(&c, 1); return 1; }
-  size_t write(const uint8_t* b, size_t n) override { Serial.write(b, n); ble_.write(b, n); return n; }
+  // optional third output that takes whole lines (the web console)
+  void (*lineSink)(const char* s, size_t n) = nullptr;
+  size_t write(uint8_t c) override { Serial.write(c); ble_.write(&c, 1); sink(&c, 1); return 1; }
+  size_t write(const uint8_t* b, size_t n) override { Serial.write(b, n); ble_.write(b, n); sink(b, n); return n; }
  private:
   BleLink& ble_;
+  char   lb_[320];
+  size_t ll_ = 0;
+  void sink(const uint8_t* b, size_t n) {
+    if (!lineSink) return;
+    for (size_t i = 0; i < n; i++) {
+      char c = (char)b[i];
+      if (c == '\r') continue;
+      lb_[ll_++] = c;
+      if (c == '\n' || ll_ == sizeof(lb_)) { lineSink(lb_, ll_); ll_ = 0; }
+    }
+  }
 };

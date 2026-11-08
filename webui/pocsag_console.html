@@ -42,6 +42,10 @@ button,input,select{font:inherit;color:inherit}
 .btn.primary{background:var(--ink);color:var(--panel);border-color:var(--ink)}
 .btn.tx{background:var(--tx);border-color:var(--tx);color:#1b1404;font-weight:600}
 .btn.small{padding:4px 10px;font-size:.9rem}
+/* Board section: Save across the top, the two clear buttons side by side below */
+.board-btns{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.board-btns .wide{grid-column:1 / -1}
+.board-btns .btn{padding-left:8px;padding-right:8px;white-space:nowrap}
 
 .wrap{display:grid;grid-template-columns:330px minmax(0,1fr);gap:0;min-height:calc(100vh - 62px)}
 .side{border-right:1px solid var(--edge);padding:8px 20px 24px;overflow:auto}
@@ -58,6 +62,24 @@ input[type=text],input[type=number],input[type=password],select{width:100%;paddi
 .row.row-wrap{flex-wrap:wrap}
 .hint{font-size:.85rem;color:var(--ink-2);margin:6px 0 0}
 .counter{float:right;font-variant-numeric:tabular-nums}
+/* send form footer: hints on the left, Transmit on the right */
+.tx-foot{display:flex;align-items:center;gap:12px;margin-top:10px}
+.tx-foot .tx-hints{flex:1;min-width:0}
+.tx-foot .hint{margin:0}
+.tx-foot .hint + .hint{margin-top:3px}
+.tx-foot .btn{flex:none}
+/* info icon with a tooltip on hover, or on tap / keyboard focus */
+label:has(.info){position:relative;white-space:nowrap}   /* tooltip anchored to the label start */
+.row label:has(.info){width:0;overflow:visible}           /* in a row: don't widen the column */
+.info{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;
+  margin-left:5px;border:1px solid var(--ink-2);border-radius:50%;font:600 10px/1 var(--font);color:var(--ink-2);
+  cursor:help;vertical-align:1px;user-select:none}
+.info:hover,.info:focus{color:var(--ink);border-color:var(--ink);outline:none}
+.info::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 4px);z-index:20;width:max-content;
+  max-width:min(260px,70vw);padding:8px 10px;border:1px solid var(--edge);border-radius:6px;background:var(--panel-2);
+  color:var(--ink);font:400 .82rem/1.4 var(--font);white-space:normal;box-shadow:0 4px 14px rgba(0,0,0,.18);
+  opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none}
+.info:hover::after,.info:focus::after{opacity:1;visibility:visible}
 .counter.over{color:var(--bad)}
 .check{display:flex;align-items:center;gap:8px;margin-top:10px;color:var(--ink)}
 
@@ -74,6 +96,12 @@ input[type=text],input[type=number],input[type=password],select{width:100%;paddi
 .diag-title{font:600 1rem/1.2 var(--cond);color:var(--ink-2);white-space:nowrap;flex:none}
 .diag-title::before{content:"\25B8";display:inline-block;width:1em;transition:transform .15s}
 .diag[open] .diag-title::before{transform:rotate(90deg)}
+/* status dot in a section header: green = on and working, amber = on but not (yet) working, ring = off */
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-left:8px;vertical-align:1px;
+  border:1px solid transparent;box-sizing:border-box}
+.dot.ok{background:var(--rx);box-shadow:0 0 5px var(--rx)}
+.dot.wait{background:var(--tx);box-shadow:0 0 5px var(--tx)}
+.dot.off{border-color:var(--ink-2);opacity:.55}
 .diag-sum{font-variant-numeric:tabular-nums;font-size:.85rem;text-align:right;min-width:0}
 .diag-body{padding:4px 12px 12px;border-top:1px dashed var(--edge)}
 .diag .freq{font-size:1.45rem;color:var(--ink);margin-top:8px}
@@ -98,7 +126,7 @@ input[type=text],input[type=number],input[type=password],select{width:100%;paddi
   border-bottom:2px solid var(--lcd-dim);padding-bottom:8px;margin-bottom:6px;flex-wrap:wrap}
 .pager-head button{background:none;border:0;font:inherit;color:var(--lcd-dim);cursor:pointer;padding:0}
 .pager-head button:hover{color:var(--lcd-ink)}
-.msgs{list-style:none;margin:0;padding:0;overflow:auto;flex:1}
+.msgs{list-style:none;margin:0;padding:0;overflow:auto;flex:1;min-height:0}
 .msg{padding:10px 0;border-bottom:1px dashed var(--lcd-dim)}
 .msg-meta{font:1.2rem/1.1 var(--pix);color:var(--lcd-dim);display:flex;gap:14px;flex-wrap:wrap}
 .msg-meta .dir{color:var(--lcd-ink)}
@@ -121,13 +149,14 @@ input[type=text],input[type=number],input[type=password],select{width:100%;paddi
 .netlist .btn{padding:2px 9px;font-size:.82rem}
 .netlist .empty-net{color:var(--ink-2);font-size:.85rem;border:0}
 .msg-raw{font:1.15rem/1.2 var(--pix);color:var(--lcd-dim);opacity:.7;word-break:break-all;white-space:pre-wrap;margin-top:2px}
+.diag a{color:var(--focus)}
 .msg-hint{font:1.05rem/1.2 var(--pix);color:var(--lcd-dim);margin-top:3px}
 .msg.new{animation:blink .5s steps(1) 3}
 @keyframes blink{50%{background:var(--lcd-2)}}
 
 details.console{border:1px solid var(--edge);border-radius:6px;background:var(--panel-2)}
 details.console summary{cursor:pointer;padding:9px 14px;font-weight:500}
-.log{height:220px;overflow:auto;margin:0;padding:8px 14px;font:13px/1.4 ui-monospace,Consolas,monospace;
+.log{height:min(220px, 28vh);overflow:auto;margin:0;padding:8px 14px;font:13px/1.4 ui-monospace,Consolas,monospace;
   border-top:1px solid var(--edge);white-space:pre-wrap;word-break:break-all}
 .log .ev{color:var(--ink-2)} .log .out{color:var(--focus)} .log .e{color:var(--bad)}
 .console form{display:flex;gap:8px;padding:8px 14px;border-top:1px solid var(--edge)}
@@ -143,11 +172,23 @@ details.console summary{cursor:pointer;padding:9px 14px;font-weight:500}
 fieldset{border:0;margin:0;padding:0;min-width:0}
 fieldset:disabled{opacity:.55}
 
+/* Wide screens: the page is exactly one window tall. The controls column scrolls on its own;
+   on the right the pager takes whatever height the serial console leaves, and its message
+   list scrolls inside it. Below a usable pager height the right column scrolls instead. */
+@media (min-width:821px){
+  body{height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+  .top,.banner{flex:none}
+  .wrap{flex:1;min-height:0;grid-template-rows:minmax(0,1fr)}
+  .side{min-height:0}
+  .main{min-height:0;overflow:auto}
+  .pager{flex:1 1 0;min-height:240px}
+  details.console{flex:none}
+}
 @media (max-width:820px){
   .wrap{grid-template-columns:1fr}
   .side{border-right:0;border-bottom:1px solid var(--edge);padding:4px 16px 16px}
   .main{padding:16px;order:-1}
-  .pager{min-height:260px}
+  .pager{min-height:260px;height:65vh;height:65dvh;flex:none}   /* fixed: the list scrolls inside */
   .top{padding:12px 16px}
   .msg-text{font-size:1.5rem}
 }
@@ -162,6 +203,7 @@ fieldset:disabled{opacity:.55}
   <span id="linkState"><span class="led" id="led"></span><span id="linkText">Offline</span></span>
   <button class="btn primary" id="connectBtn">Connect USB</button>
   <button class="btn" id="bleBtn">Connect Bluetooth</button>
+  <button class="btn primary" id="wifiBtn" hidden>Connect WiFi</button>
 </header>
 <div class="banner" id="noSerial">This browser can't talk to the board over USB or Bluetooth. Open this page in Chrome or Edge.</div>
 
@@ -179,9 +221,10 @@ fieldset:disabled{opacity:.55}
         <datalist id="ricList"></datalist>
         <label for="txText">Message <span class="counter" id="txCount">0 / 80</span></label>
         <input type="text" id="txText" maxlength="240" autocomplete="off" placeholder="Message text">
-        <p class="hint" id="txHint"></p>
-        <p class="hint" id="txAir"></p>
-        <div class="row" style="margin-top:12px"><button class="btn tx" id="txBtn" type="submit">Transmit</button></div>
+        <div class="tx-foot">
+          <div class="tx-hints"><p class="hint" id="txHint"></p><p class="hint" id="txAir"></p></div>
+          <button class="btn tx" id="txBtn" type="submit">Transmit</button>
+        </div>
       </form>
     </section>
 
@@ -194,9 +237,10 @@ fieldset:disabled{opacity:.55}
       </form>
       <label class="check"><input type="checkbox" id="monIn"> Show pages for every RIC</label>
       <label class="check"><input type="checkbox" id="beepIn"> Beep in this browser for tone pages</label>
-      <label for="bwIn">Receive filter width</label>
+      <label for="bwIn">Receive filter width<span class="info" tabindex="0" role="note" id="bwInfo"
+        data-tip="Narrower filters hear weaker pages, but the frequency has to be calibrated. The signal itself is about 12 kHz wide."
+        aria-label="Narrower filters hear weaker pages, but the frequency has to be calibrated. The signal itself is about 12 kHz wide.">i</span></label>
       <select id="bwIn"></select>
-      <p class="hint" id="bwHint">Narrower filters hear weaker pages, but the frequency has to be calibrated. The signal itself is about 12 kHz wide.</p>
     </section>
 
     <section aria-labelledby="h-pwr">
@@ -207,55 +251,32 @@ fieldset:disabled{opacity:.55}
       </form>
       <label class="check"><input type="checkbox" id="autoIdIn"> Put my callsign in front of text pages</label>
       <form id="pwrForm" class="row">
-        <div><label for="pwrIn">Output power, dBm</label><input type="number" id="pwrIn"></div>
+        <div><label for="pwrIn">Output power, dBm<span class="info" tabindex="0" role="note" id="pwrInfo"
+          data-tip="Chip output. Modules with an external PA add their own gain." aria-label="Chip output. Modules with an external PA add their own gain.">i</span></label><input type="number" id="pwrIn"></div>
         <button class="btn" type="submit">Apply</button>
         <button class="btn" type="button" id="pwrMax">Max</button>
       </form>
-      <p class="hint" id="pwrRange"></p>
-      <p class="hint" id="pwrNote">Chip output. Modules with an external PA add their own gain.</p>
       <form id="txmaxForm" class="row">
-        <div><label for="txmaxIn">Transmit time limit, seconds</label><input type="number" id="txmaxIn"></div>
+        <div><label for="txmaxIn">Transmit time limit, seconds<span class="info" tabindex="0" role="note"
+          data-tip="Pages that would take longer are refused, and a stuck transmitter is switched off." aria-label="Pages that would take longer are refused, and a stuck transmitter is switched off.">i</span></label><input type="number" id="txmaxIn"></div>
         <button class="btn" type="submit">Apply</button>
       </form>
-      <p class="hint">Pages that would take longer are refused, and a stuck transmitter is switched off.</p>
     </section>
 
     <section aria-labelledby="h-dev">
       <h2 id="h-dev">Board</h2>
-      <div class="row row-wrap">
-        <button class="btn" id="saveBtn" type="button">Save settings to board</button>
+      <div class="board-btns">
+        <button class="btn wide" id="saveBtn" type="button">Save settings to board</button>
         <button class="btn" id="clsBtn" type="button">Clear OLED</button>
-      </div>
-      <div class="row row-wrap" style="margin-top:8px">
-        <button class="btn small" id="logClearBtn" type="button">Clear pages stored on board</button>
+        <button class="btn" id="logClearBtn" type="button" title="Forget the received pages stored on the board">Clear stored pages</button>
       </div>
       <label class="check"><input type="checkbox" id="ledIn"> Blink the board LED on send, receive and heartbeat</label>
       <p class="dirty" id="dirty">Changes are active but not saved. They'll be lost when the board resets.</p>
-      <details class="diag" id="bleBox">
-        <summary><span class="diag-title">Bluetooth</span><span class="diag-sum" id="bleSum">not connected</span></summary>
-        <div class="diag-body">
-          <label class="check"><input type="checkbox" id="bleIn"> Bluetooth console</label>
-          <p class="hint" id="bleHint">Pair from a phone with the PIN shown on the board's display.</p>
-          <form id="pinForm" class="row">
-            <div><label for="pinIn">Bluetooth PIN, 6 digits</label><input type="text" id="pinIn" inputmode="numeric" maxlength="6" autocomplete="off" placeholder="unchanged"></div>
-            <button class="btn" type="submit">Set PIN</button>
-          </form>
-          <div class="row" style="margin-top:8px"><button class="btn small" id="forgetBtn" type="button">Forget paired phones</button></div>
-        </div>
-      </details>
       <details class="diag" id="dapBox">
-        <summary><span class="diag-title">DAPNET</span><span class="diag-sum" id="dapSum">not connected</span></summary>
+        <summary><span class="diag-title">DAPNET<span class="dot" id="dapDot" role="img" aria-label="unknown"></span></span><span class="diag-sum" id="dapSum">not connected</span></summary>
         <div class="diag-body">
           <label class="check"><input type="checkbox" id="dapIn"> Relay pages from DAPNET</label>
           <p class="hint" id="dapState" aria-live="polite"></p>
-          <h3 class="diag-sub">WiFi networks</h3>
-          <p class="hint" style="margin-top:2px">The board joins the strongest known network in range, so add home, work, a phone hotspot…</p>
-          <ul class="netlist" id="netList"></ul>
-          <form id="wifiForm" class="row row-wrap" style="margin-top:8px">
-            <div><label for="wssidIn">Network name (SSID)</label><input type="text" id="wssidIn" autocomplete="off" spellcheck="false" maxlength="32"></div>
-            <div><label for="wpassIn">Password</label><input type="password" id="wpassIn" autocomplete="new-password" maxlength="63" placeholder="empty = open network"></div>
-            <button class="btn" type="submit" id="wifiAddBtn">Add</button>
-          </form>
           <form id="dapForm" class="row row-wrap" style="margin-top:10px">
             <div><label for="dnameIn">Transmitter name</label><input type="text" id="dnameIn" autocomplete="off" spellcheck="false" autocapitalize="none"></div>
             <div><label for="dkeyIn">Auth key</label><input type="password" id="dkeyIn" autocomplete="new-password" placeholder="unchanged"></div>
@@ -266,6 +287,46 @@ fieldset:disabled{opacity:.55}
             <button class="btn" type="submit">Set server</button>
           </form>
           <p class="hint">Use the transmitter name and auth key DAPNET gave you for this transmitter, not your user login. Pages go out only in the time slots DAPNET assigns. Save settings to keep them.</p>
+        </div>
+      </details>
+      <details class="diag" id="wifiBox">
+        <summary><span class="diag-title">WiFi<span class="dot" id="wifiDot" role="img" aria-label="unknown"></span></span><span class="diag-sum" id="wifiSum">not connected</span></summary>
+        <div class="diag-body">
+          <p class="hint" style="margin-top:6px">Networks the board may join, for DAPNET and the web console. It joins the strongest known network in range.</p>
+          <ul class="netlist" id="netList"></ul>
+          <form id="wifiForm" class="row row-wrap" style="margin-top:8px">
+            <div><label for="wssidIn">Network name (SSID)</label><input type="text" id="wssidIn" autocomplete="off" spellcheck="false" maxlength="32"></div>
+            <div><label for="wpassIn">Password</label><input type="password" id="wpassIn" autocomplete="new-password" maxlength="63" placeholder="empty = open network"></div>
+            <button class="btn" type="submit" id="wifiAddBtn">Add</button>
+          </form>
+          <p class="hint" id="wifiState" aria-live="polite"></p>
+        </div>
+      </details>
+      <details class="diag" id="bleBox">
+        <summary><span class="diag-title">Bluetooth<span class="dot" id="bleDot" role="img" aria-label="unknown"></span></span><span class="diag-sum" id="bleSum">not connected</span></summary>
+        <div class="diag-body">
+          <label class="check"><input type="checkbox" id="bleIn"> Bluetooth console</label>
+          <p class="hint" id="bleHint">Pair from a phone with the PIN shown on the board's display.</p>
+          <form id="pinForm" class="row">
+            <div><label for="pinIn">Bluetooth PIN, 6 digits</label><input type="text" id="pinIn" inputmode="numeric" maxlength="6" autocomplete="off" placeholder="unchanged"></div>
+            <button class="btn" type="submit">Set PIN</button>
+          </form>
+          <div class="row" style="margin-top:8px"><button class="btn small" id="forgetBtn" type="button">Forget paired phones</button></div>
+        </div>
+      </details>
+      <details class="diag" id="webBox">
+        <summary><span class="diag-title">Web console<span class="dot" id="webDot" role="img" aria-label="unknown"></span></span><span class="diag-sum" id="webSum">not connected</span></summary>
+        <div class="diag-body">
+          <label class="check"><input type="checkbox" id="webIn"> Serve this console from the board over WiFi</label>
+          <p class="hint" id="webState" aria-live="polite"></p>
+          <form id="webLoginForm" class="row row-wrap" style="margin-top:10px">
+            <div><label for="webUserIn">Login name</label><input type="text" id="webUserIn" autocomplete="off" spellcheck="false" autocapitalize="none" maxlength="32"></div>
+            <div><label for="webPassIn">Password</label><input type="password" id="webPassIn" autocomplete="new-password" maxlength="63" placeholder="unchanged"></div>
+            <button class="btn" type="submit">Set</button>
+          </form>
+          <label class="check"><input type="checkbox" id="webApIn"> Open the board's own WiFi when no known network is in range</label>
+          <p class="hint" id="webApHint">Network name is the board's Bluetooth name, its password is the web password; the console is then at http://192.168.4.1/. It closes after 10 minutes if nobody connects.</p>
+          <p class="hint">Plain HTTP: the password travels unencrypted over the local network. USB and Bluetooth aren't available in a page served by the board; it talks to the board over WiFi.</p>
         </div>
       </details>
 
@@ -341,7 +402,7 @@ const store = {
 };
 
 let port = null, reader = null, writer = null, keepReading = false;
-let link = null;          // {kind:"usb"|"ble", write(text), close()}
+let link = null;          // {kind:"usb"|"ble"|"wifi", write(text), close()}
 let bleDev = null, rxBuf = "", bleDec = new TextDecoder();
 let logRequested = false, logNew = 0, rssiOn = false, rssiKeep = null;
 let cfg = null, savedCfg = null, txPending = null;
@@ -497,11 +558,11 @@ function fillRics(){
   for (const r of recentRics){ const o = document.createElement("option"); o.value = r; dl.appendChild(o); }
 }
 
-const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led, c.ble, c.call, c.autoid, c.bw, c.txmax, c.dest, c.dap, c.drev].join("|") : "";
+const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led, c.ble, c.call, c.autoid, c.bw, c.txmax, c.dest, c.dap, c.drev, c.web, c.webap].join("|") : "";
 function renderCfg(){
   if (!cfg) return;
   $("board").textContent = cfg.board + (cfg.ble && cfg.blename ? `, Bluetooth ${cfg.blename}` : "") +
-    (link ? (link.kind === "ble" ? " (via Bluetooth)" : " (via USB)") : "");
+    (link ? ({ble:" (via Bluetooth)", wifi:" (via WiFi)"}[link.kind] || " (via USB)") : "");
   if (cfg.ble !== undefined) $("bleSum").textContent = cfg.ble ? `on, ${cfg.blename}` : "off";
   if (cfg.ble !== undefined){
     $("bleIn").checked = !!cfg.ble;
@@ -539,27 +600,36 @@ function renderCfg(){
   const p = $("pwrIn"); p.min = cfg.pmin; p.max = cfg.pmax;
   if (document.activeElement !== p) p.value = cfg.pwr;
   const mW = d => { const w = Math.pow(10, d / 10); return w < 10 ? w.toFixed(1) : Math.round(w); };
-  $("pwrRange").textContent = `This board: ${cfg.pmin} to ${cfg.pmax} dBm. Now ${cfg.pwr} dBm, about ${mW(cfg.pwr)} mW; maximum about ${mW(cfg.pmax)} mW.`;
-  if (cfg.pnote) $("pwrNote").textContent = cfg.pnote;
+  const pTip = `This board: ${cfg.pmin} to ${cfg.pmax} dBm. Now ${cfg.pwr} dBm, about ${mW(cfg.pwr)} mW; maximum about ${mW(cfg.pmax)} mW. ` +
+    (cfg.pnote || "Chip output. Modules with an external PA add their own gain.");
+  $("pwrInfo").dataset.tip = pTip; $("pwrInfo").setAttribute("aria-label", pTip);
   $("pwrMax").disabled = cfg.pwr >= cfg.pmax;
   $("pagerRic").textContent = cfg.mon ? "ALL RICS" : "RIC " + cfg.ric;
   if (cfg.dap !== undefined){
     $("dapIn").checked = !!cfg.dap;
     renderNets();
+    $("webIn").checked = !!cfg.web;
+    $("webApIn").checked = cfg.webap !== false;
+    if (document.activeElement !== $("webUserIn")) $("webUserIn").value = cfg.webuser || "";
+    $("webPassIn").placeholder = cfg.webdef ? "board default, on its display" : cfg.webpass ? "unchanged" : "not set (8 or more characters)";
+    if (cfg.apname) $("webApHint").textContent = `The network is called ${cfg.apname}, its password is the web password; the console is then at http://192.168.4.1/. It closes after 10 minutes if nobody connects.`;
+    renderWeb(); renderWifi(); renderDots();
     if (document.activeElement !== $("dnameIn")) $("dnameIn").value = cfg.dname || "";
     $("dkeyIn").placeholder = cfg.dkey ? "unchanged" : "not set";
     if (document.activeElement !== $("dsrvIn")) $("dsrvIn").value = cfg.dsrv || "";
     renderDap();
   }
-  if (savedCfg === null) savedCfg = cfgKey(cfg);          // state at boot = what's in flash
-  const dirty = cfgKey(cfg) !== savedCfg;
+  // The board says whether its settings differ from what's saved (same answer for every client);
+  // older firmware doesn't, then compare with the state seen at connect.
+  if (savedCfg === null) savedCfg = cfgKey(cfg);
+  const dirty = cfg.unsaved !== undefined ? !!cfg.unsaved : cfgKey(cfg) !== savedCfg;
   $("dirty").classList.toggle("show", dirty);
   $("saveBtn").classList.toggle("tx", dirty);          // same amber as Transmit: "press me"
   if (!messages.length) renderMsgs();
 }
 
 /* ---------- DAPNET ---------- */
-let dapSt = null;
+let dapSt = null, netSt = null;
 // known WiFi networks (from @CFG) with the one in use / being tried (from @DAP)
 function renderNets(){
   const ul = $("netList"); ul.textContent = "";
@@ -572,8 +642,8 @@ function renderNets(){
     const li = document.createElement("li");
     const name = document.createElement("span"); name.className = "net-name"; name.textContent = n.ssid; name.title = n.ssid;
     const note = document.createElement("span"); note.className = "net-note";
-    const cur = dapSt && dapSt.ssid === n.ssid;
-    if (cur && dapSt.ip){ note.textContent = `connected, ${dapSt.wrssi} dBm`; note.classList.add("on"); }
+    const cur = netSt && netSt.ssid === n.ssid;
+    if (cur && netSt.ip){ note.textContent = `connected, ${netSt.wrssi} dBm`; note.classList.add("on"); }
     else if (cur) note.textContent = "trying…";
     else note.textContent = n.pass ? "password set" : "open";
     const rm = document.createElement("button"); rm.type = "button"; rm.className = "btn"; rm.textContent = "Remove";
@@ -588,21 +658,96 @@ function renderNets(){
   $("wifiAddBtn").textContent = known ? "Change password" : "Add";
 }
 
+// header dots: state "ok" | "wait" | "off" | null (unknown, no board); text for tooltip / screen readers
+function setDot(id, state, text){
+  const d = $(id);
+  d.className = "dot" + (state ? " " + state : "");
+  d.title = text || ""; d.setAttribute("aria-label", text || "unknown");
+}
+function renderWifi(){
+  const sum = $("wifiSum"), st = $("wifiState");
+  if (!cfg){ sum.textContent = "not connected"; st.textContent = ""; return; }
+  const nets = (cfg.wnets || []).length;
+  if (!netSt){ sum.textContent = nets ? `${nets} known` : "no networks"; st.textContent = ""; return; }
+  const n = netSt;
+  if (!n.on) sum.textContent = nets ? `${nets} known, off` : "off";
+  else if (n.ip) sum.textContent = `${n.ssid || "connected"}, ${n.wrssi} dBm`;
+  else if (n.ap) sum.textContent = `own network ${cfg.apname || ""}`;
+  else if (n.sleep) sum.textContent = "off (unused)";
+  else sum.textContent = n.scan ? "searching" : n.ssid ? `trying ${n.ssid}` : "searching";
+  const parts = [];
+  if (!n.on) parts.push(nets ? "WiFi is off: neither DAPNET nor the web console needs it right now." : "No networks yet.");
+  if (n.ip) parts.push(`Connected to ${n.ssid}, address ${n.ip}.`);
+  else if (n.on && !n.sleep) parts.push(n.ssid ? `Trying ${n.ssid}…` : nets ? "Looking for a known network…" : "Add a network to connect the board to it.");
+  if (n.ap) parts.push(`Own network ${cfg.apname || ""} is open (${n.apn || 0} device${n.apn === 1 ? "" : "s"} connected), console at http://${n.apip}/.`);
+  st.textContent = parts.join(" ");
+}
+
+function renderDots(){
+  if (!cfg){ ["dapDot", "bleDot", "webDot", "wifiDot"].forEach(i => setDot(i, null, "")); return; }
+  // WiFi: joined a known network = working; only the board's own network or searching = amber
+  if (!netSt) setDot("wifiDot", null, "");
+  else if (!netSt.on || netSt.sleep) setDot("wifiDot", "off", netSt.sleep ? "off (own network closed unused)" : "off");
+  else if (netSt.ip) setDot("wifiDot", "ok", `connected to ${netSt.ssid}`);
+  else setDot("wifiDot", "wait", netSt.ap ? "own network only" : "searching");
+  // Bluetooth: on = advertising or connected
+  setDot("bleDot", cfg.ble ? "ok" : "off",
+         cfg.ble ? (link && link.kind === "ble" ? "on, connected" : "on") : "off");
+  // DAPNET: online with slots = working; no dot until the board has reported its state
+  if (!cfg.dap) setDot("dapDot", "off", "off");
+  else if (!dapSt) setDot("dapDot", null, "");
+  else if (dapSt && dapSt.online) setDot("dapDot", "ok", "online" + (dapSt.slots ? ", slots " + dapSt.slots : ""));
+  else setDot("dapDot", "wait", dapSt ? dapSt.state : "starting");
+  // web console: server up and reachable over WiFi or the board's own network
+  const n = netSt || {};
+  if (!cfg.web) setDot("webDot", "off", "off");
+  else if (!netSt) setDot("webDot", null, "");
+  else if (!cfg.webpass) setDot("webDot", "wait", "needs a password");
+  else if (n.web && (n.ip || n.ap)) setDot("webDot", "ok", "reachable at " + [n.ip, n.ap && n.apip].filter(Boolean).join(" and "));
+  else setDot("webDot", "wait", n.sleep ? "WiFi off (own network closed unused)" : "waiting for WiFi");
+}
+
+// web console status: addresses where the board serves the page
+function renderWeb(){
+  const st = $("webState");
+  if (!cfg){ $("webSum").textContent = "not connected"; st.textContent = ""; return; }
+  if (!cfg.web){ $("webSum").textContent = "off"; st.textContent = cfg.webpass ? "Ready. Tick the box to start it." : "Set a password (8 or more characters) first."; return; }
+  if (!cfg.webpass){ $("webSum").textContent = "needs password"; st.textContent = "Set a password (8 or more characters) to start it."; return; }
+  if (!netSt){ $("webSum").textContent = "…"; st.textContent = ""; return; }
+  const n = netSt;
+  const urls = [n.ip && `http://${n.ip}/`, n.ap && `http://${n.apip}/ (own WiFi ${cfg.apname || ""})`].filter(Boolean);
+  $("webSum").textContent = n.web ? (urls.length ? (n.ip || n.apip) : "waiting for WiFi") : "starting";
+  st.textContent = "";
+  if (urls.length){
+    if (cfg.webdef) st.append(`Login ${cfg.webuser || "admin"} with the 8-digit password shown on the board's display at start. `);
+    st.append("Open ");
+    urls.forEach((u, i) => {
+      if (i) st.append(" or ");
+      const a = document.createElement("a"); const href = u.split(" ")[0];
+      a.href = href; a.textContent = u; a.target = "_blank"; a.rel = "noopener"; st.appendChild(a);
+    });
+    st.append(` · ${n.webn || 0} browser${n.webn === 1 ? "" : "s"} connected`);
+  } else if (n.sleep) st.textContent = "WiFi is off: no known network, and nobody used the board's own WiFi within 10 minutes. Add a network under WiFi, or untick and tick “Open the board's own WiFi” to reopen it.";
+  else st.textContent = "Waiting for WiFi: add a network under WiFi, or let the board open its own.";
+}
+
 function renderDap(){
   const on = cfg && cfg.dap;
   if (!on){
     $("dapSum").textContent = "off";
     const missing = cfg ? [!(cfg.wnets && cfg.wnets.length) && "a WiFi network", !cfg.dname && "transmitter name", !cfg.dkey && "auth key"].filter(Boolean) : [];
-    $("dapState").textContent = missing.length ? `Needs ${missing.join(", ")}.` : "Ready. Tick the box to connect.";
+    $("dapState").textContent = missing.length ? `Needs ${missing.join(", ")}.` + (cfg && !(cfg.wnets && cfg.wnets.length) ? " Add a network with internet under WiFi below." : "")
+                                               : "Ready. Tick the box to connect.";
     return;
   }
   if (!dapSt){ $("dapSum").textContent = "on"; $("dapState").textContent = ""; return; }
   const d = dapSt;
   $("dapSum").textContent = d.online ? `online, slots ${d.slots || "none"}` : d.state;
   const parts = [d.online ? "Online" : d.state.charAt(0).toUpperCase() + d.state.slice(1)];
-  if (d.ip) parts.push(`WiFi ${d.ip}, ${d.wrssi} dBm`);
-  if (!d.ip && d.scan) parts.push("scanning for known networks");
-  else if (!d.ip && d.ssid) parts.push(`trying ${d.ssid}`);
+  const n = netSt || {};
+  if (n.ip) parts.push(`WiFi ${n.ssid || ""} ${n.ip}, ${n.wrssi} dBm`);
+  else if (n.scan) parts.push("scanning for known networks");
+  else if (n.ssid) parts.push(`trying ${n.ssid}`);
   if (d.online) parts.push(d.slots ? `slots ${d.slots.split("").join(" ")}` : "no slots assigned yet");
   parts.push(`${d.rx} received, ${d.tx} sent` + (d.q ? `, ${d.q} waiting` : "") + (d.drop ? `, ${d.drop} dropped` : ""));
   $("dapState").textContent = parts.join(" · ");
@@ -648,6 +793,8 @@ function handleLine(line){
   switch (type){
     case "CFG":
       cfg = d; renderCfg();
+      if (link && !logRequested && typeof d.up === "number" && d.up < 15 && link.kind === "usb")
+        toast("The board restarted when the USB port was opened (its auto-reset). WiFi, DAPNET and other connections come back within a minute.");
       if (link && !logRequested){
         logRequested = true; logNew = 0; send("/log");
         if (d.dest && document.activeElement !== $("txRic")) { $("txRic").value = d.dest; updateCount(); }
@@ -698,7 +845,9 @@ function handleLine(line){
       }
       break;
     case "DAP":
-      dapSt = d; renderDap(); renderNets(); break;
+      dapSt = d; renderDap(); renderDots(); break;
+    case "NET":
+      netSt = d; renderDap(); renderNets(); renderWeb(); renderWifi(); renderDots(); break;
     case "TX":
       if (d.src === "dapnet"){                 // relayed for DAPNET: list it, nothing else
         addMsg({dir:"tx", ric:d.ric, kind:d.kind, func:d.func, text:d.text, air:d.airtime, via:"DAPNET",
@@ -728,7 +877,7 @@ function handleLine(line){
 async function send(cmd){
   if (!link) { toast("Connect the board first", true); return; }
   // don't put secrets on screen
-  const shown = cmd.replace(/^(\/wifi (?:add )?[^|]*\|).+$/i, "$1•••").replace(/^(\/dapnet key ).+$/i, "$1•••");
+  const shown = cmd.replace(/^(\/wifi (?:add )?[^|]*\|).+$/i, "$1•••").replace(/^(\/dapnet key ).+$/i, "$1•••").replace(/^(\/web pass ).+$/i, "$1•••");
   logLine("> " + shown, "out");
   try { await link.write(cmd + "\n"); }
   catch(e){ logLine("Send failed: " + e.message, "e"); toast("Couldn't send to the board: " + e.message, true); }
@@ -748,6 +897,7 @@ function linkUp(kind){
   savedCfg = null; rxBuf = ""; logRequested = false;
   setLink("on"); $("controls").disabled = false;
   $("connectBtn").textContent = "Disconnect"; $("connectBtn").disabled = false; $("bleBtn").hidden = true;
+  $("connectBtn").hidden = false; $("wifiBtn").hidden = true;
   $("connectBtn").classList.add("primary");
 }
 
@@ -837,9 +987,43 @@ async function connectBle(){
   }
 }
 
+/* ---------- WiFi (WebSocket, only when this page was served by the board) ---------- */
+// The board serves this page over plain http, so Web Serial / Web Bluetooth aren't available
+// here (they need https); the page talks to the board that served it instead.
+const servedByBoard = location.protocol === "http:" && !/^(localhost|127\.)/.test(location.hostname);
+let ws = null, wsRetry = null, wsManual = false;
+
+async function connectWifi(){
+  clearTimeout(wsRetry); wsRetry = null; wsManual = false;
+  let token;
+  try {
+    const r = await fetch("/token", { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status === 401 ? "login required, reload the page" : "HTTP " + r.status);
+    token = (await r.text()).trim();
+  } catch(e){ toast("Can't reach the board: " + e.message, true); scheduleWifi(); return; }
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => {
+    ws.send("@AUTH " + token);                  // first message: the board only listens after this
+    link = { kind: "wifi", write: async t => ws.send(t), close: () => { wsManual = true; try { ws.close(); } catch(e){} } };
+    linkUp("wifi");
+    setTimeout(() => send("/cfg"), 300);
+  };
+  ws.onmessage = e => feed(e.data);
+  ws.onclose = () => {
+    const was = link && link.kind === "wifi", manual = wsManual;   // disconnect() closes the link too
+    ws = null;
+    if (was) disconnect(!manual);
+    if (!manual) scheduleWifi();
+  };
+}
+function scheduleWifi(){
+  clearTimeout(wsRetry);
+  wsRetry = setTimeout(() => { if (!link) connectWifi(); }, 4000);
+}
+
 async function disconnect(lost){
   keepReading = false;
-  const wasBle = link && link.kind === "ble";
+  const wasBle = link && link.kind === "ble", wasWifi = link && link.kind === "wifi";
   if (link) { try { link.close(); } catch(e){} }
   link = null;
   try { if (reader) await reader.cancel(); } catch(e){}
@@ -850,21 +1034,28 @@ async function disconnect(lost){
   setLink("off"); $("controls").disabled = true;
   $("connectBtn").textContent = "Connect USB"; $("connectBtn").disabled = !("serial" in navigator);
   $("bleBtn").hidden = !("bluetooth" in navigator);
+  $("connectBtn").hidden = !("serial" in navigator);
+  $("wifiBtn").hidden = !servedByBoard;
   $("board").textContent = "No board connected";
   $("calSum").textContent = "not connected";
   $("bleSum").textContent = "not connected";
   dapSt = null; $("dapSum").textContent = "not connected"; $("dapState").textContent = "";
+  netSt = null; renderWeb(); renderWifi(); renderDots();
   rssiSet(false, true);
   $("saveBtn").classList.remove("tx");
-  if (lost) toast(wasBle ? "Bluetooth connection lost" : "Board disconnected", true);
+  if (lost) toast(wasBle ? "Bluetooth connection lost" : wasWifi ? "WiFi connection lost, reconnecting…" : "Board disconnected", true);
   renderMsgs();
 }
 
 /* ---------- wiring ---------- */
 const hasSerial = "serial" in navigator, hasBle = "bluetooth" in navigator;
-if (!hasSerial && !hasBle) $("noSerial").classList.add("show");
+if (!hasSerial && !hasBle && !servedByBoard) $("noSerial").classList.add("show");
 $("connectBtn").disabled = !hasSerial;
+$("connectBtn").hidden = !hasSerial && servedByBoard;
 $("bleBtn").hidden = !hasBle;
+$("wifiBtn").hidden = !servedByBoard;
+$("wifiBtn").onclick = () => connectWifi();
+if (servedByBoard) connectWifi();
 $("connectBtn").onclick = () => link ? disconnect(false) : connectUsb();
 $("bleBtn").onclick = () => connectBle();
 navigator.serial && navigator.serial.addEventListener("disconnect", e => { if (e.target === port) disconnect(true); });
@@ -949,7 +1140,25 @@ $("callForm").onsubmit = e => {
 };
 $("autoIdIn").onchange = () => send(`/autoid ${$("autoIdIn").checked ? 1 : 0}`);
 $("forgetBtn").onclick = () => send("/bleforget");
+document.querySelectorAll(".info").forEach(i => i.addEventListener("click", e => { e.preventDefault(); i.focus(); }));
 $("dapIn").onchange = () => send(`/dapnet ${$("dapIn").checked ? 1 : 0}`);
+$("webIn").onchange = () => {
+  if (!$("webIn").checked && link && link.kind === "wifi") toast("Web console turned off. Reconnect over USB or Bluetooth to turn it back on.");
+  send(`/web ${$("webIn").checked ? 1 : 0}`);
+};
+$("webApIn").onchange = () => send(`/web ap ${$("webApIn").checked ? 1 : 0}`);
+$("webLoginForm").onsubmit = async e => {
+  e.preventDefault();
+  const u = $("webUserIn").value.trim(), p = $("webPassIn").value;
+  if (u && u !== (cfg && cfg.webuser)){
+    if (!/^[^\s:]{1,32}$/.test(u)){ toast("Login name: no spaces or colons", true); return; }
+    await send(`/web user ${u}`);
+  }
+  if (p){
+    if (p.length < 8 || p.length > 63){ toast("The password needs 8 to 63 characters", true); return; }
+    await send(`/web pass ${p}`); $("webPassIn").value = "";
+  }
+};
 $("wifiForm").onsubmit = e => {
   e.preventDefault();
   const ssid = $("wssidIn").value.trim(), pass = $("wpassIn").value;
@@ -1003,6 +1212,10 @@ $("calib").open = store.get("pocsag.calibOpen", false);
 $("bleBox").open = store.get("pocsag.bleOpen", false);
 $("bleBox").addEventListener("toggle", () => store.set("pocsag.bleOpen", $("bleBox").open));
 $("dapBox").open = store.get("pocsag.dapOpen", false);
+$("wifiBox").open = store.get("pocsag.wifiOpen", false);
+$("wifiBox").addEventListener("toggle", () => store.set("pocsag.wifiOpen", $("wifiBox").open));
+$("webBox").open = store.get("pocsag.webOpen", false);
+$("webBox").addEventListener("toggle", () => store.set("pocsag.webOpen", $("webBox").open));
 $("dapBox").addEventListener("toggle", () => store.set("pocsag.dapOpen", $("dapBox").open));
 $("beepIn").checked = store.get("pocsag.beep", true);
 $("beepIn").onchange = () => { store.set("pocsag.beep", $("beepIn").checked); if ($("beepIn").checked){ unlockAudio(); pagerBeep(); } };
