@@ -24,7 +24,7 @@
 */
 
 #include <Wire.h>
-#include <U8x8lib.h>
+#include <U8g2lib.h>
 #include <stdarg.h>
 #include <Preferences.h>
 #include <Ticker.h>
@@ -116,11 +116,21 @@ static void ledIdle() { ledTicker.detach(); ledToggles = 0; ledWrite(false); }
 static bool ledQuiet() { return ledToggles == 0; }
 
 // ---------------- OLED + logging ----------------
-U8X8_SSD1306_128X64_NONAME_HW_I2C oled(PIN_OLED_RST, PIN_SCL, PIN_SDA);
-static const uint8_t LOG_W = 16, LOG_H = 8;
-static uint8_t oledBuf[LOG_W * LOG_H];
-U8X8LOG oledLog;
+// U8g2 with a full frame buffer (1 KB RAM) so the log can use any font. Three sizes,
+// switched with /font; medium is the classic 8x8 look.
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, PIN_OLED_RST, PIN_SCL, PIN_SDA);
+struct OledFont { const uint8_t* font; uint8_t cols, rows; int8_t lineOff; const char* name; };
+static const OledFont OLED_FONTS[] = {
+  { u8g2_font_5x7_tr,              25, 9, 0, "small" },     // 5x7:  9 lines x 25 characters
+  { u8g2_font_chroma48medium8_8r,  16, 8, 1, "medium" },    // 8x8:  8 lines x 16 characters
+  { u8g2_font_7x13_tr,             18, 5, 1, "large" },     // 7x13: 5 lines x 18 characters
+};
+static const uint8_t OLED_FONT_N = sizeof(OLED_FONTS) / sizeof(OLED_FONTS[0]);
+static const uint8_t DEFAULT_FONT = 1;
+static uint8_t oledBuf[25 * 9];                // big enough for every font
+U8G2LOG oledLog;
 static bool oledOk = false;
+static uint8_t oledFont = DEFAULT_FONT;
 
 static void logf(const char* fmt, ...) {
   char buf[256];
@@ -129,16 +139,31 @@ static void logf(const char* fmt, ...) {
   if (oledOk) oledLog.print(buf);
 }
 
+static void oledSetFont(uint8_t i) {           // clears the log
+  if (i >= OLED_FONT_N) i = DEFAULT_FONT;
+  oledFont = i;
+  if (!oledOk) return;
+  const OledFont& f = OLED_FONTS[i];
+  oled.setFont(f.font);
+  oled.setFontRefHeightText();
+  oledLog.begin(oled, f.cols, f.rows, oledBuf);
+  oledLog.setLineHeightOffset(f.lineOff);
+  oledLog.setRedrawMode(0);            // redraw on newline
+  oled.clearDisplay();
+}
+
 static void oledInit() {
   if (PIN_VEXT >= 0) { pinMode(PIN_VEXT, OUTPUT); digitalWrite(PIN_VEXT, LOW); }   // Heltec: power the OLED
   Wire.begin(PIN_SDA, PIN_SCL);
   delay(100);                          // OLED reset / supply settle
   oled.setBusClock(400000);            // U8g2 sets the Wire clock itself on every transfer
   oled.begin();
-  oled.setFont(u8x8_font_chroma48medium8_r);
-  oledLog.begin(oled, LOG_W, LOG_H, oledBuf);
-  oledLog.setRedrawMode(0);            // redraw on newline
+  Preferences p;                       // the font is needed before the rest of the settings load
+  p.begin("pocsag", true);
+  uint8_t f = p.getUChar("font", DEFAULT_FONT);
+  p.end();
   oledOk = true;
+  oledSetFont(f);
 }
 
 // Flash the whole display negative and back (SSD1306 "inverse display" command), e.g. as a
@@ -196,7 +221,7 @@ static void warnIf(int16_t st, const char* what) {
 // show the same "unsaved changes" state, whoever made the change.
 static uint32_t savedKey = 0;
 static uint32_t settingsKey() {
-  String k = String(corrHz) + '|' + myRic + '|' + monAll + '|' + txPwr + '|' + ledEnabled + '|' + bleEnabled + '|' +
+  String k = String(corrHz) + '|' + myRic + '|' + monAll + '|' + txPwr + '|' + ledEnabled + '|' + oledFont + '|' + bleEnabled + '|' +
              blePin + '|' + callsign + '|' + autoId + '|' + String(rxBw, 1) + '|' + txMax + '|' + lastDest + '|' +
              dapOn + '|' + dap.host + '|' + dap.port + '|' + dap.name + '|' + dap.key + '|' +
              webOn + '|' + webAp + '|' + web.user + '|' + web.pass;
@@ -222,7 +247,7 @@ static void emitCfg() {
     callsign, autoId ? "true" : "false", PWR_NOTE,
     rxBw, BW_SINGLE_SIDED ? "true" : "false", txMax, TXMAX_MIN, TXMAX_MAX, MsgLog::LOG_N,
     (unsigned long)lastDest);
-  String d = ",\"dap\":" + String(dapOn ? "true" : "false") + ",\"wnets\":[";
+  String d = ",\"font\":" + String(oledFont) + ",\"dap\":" + String(dapOn ? "true" : "false") + ",\"wnets\":[";
   for (uint8_t i = 0; i < wifi.netCount; i++) {          // passwords never leave the board
     if (i) d += ',';
     d += "{\"ssid\":"; jsonStr(d, wifi.nets[i].ssid.c_str());
@@ -634,6 +659,7 @@ static void help() {
     "  /autoid 0|1     put the callsign in front of text pages\n"
     "  /log            replay stored received pages   /logclear  forget them\n"
     "  /led 0|1        status LED patterns\n"
+    "  /font small|medium|large   OLED text size (or 0|1|2)\n"
     "  /ble 0|1        Bluetooth LE console   /blepin NNNNNN   /bleforget\n"
     "  /wifi           list WiFi networks for DAPNET (up to 8, tried wherever you are)\n"
     "  /wifi add SSID|PASS   add one or change its password   /wifi del SSID   /wifi clear\n"
@@ -729,6 +755,7 @@ static void handleCommand(String cmd) {
     prefs.putBool("mon", monAll);
     prefs.putChar("pwr", txPwr);
     prefs.putBool("led", ledEnabled);
+    prefs.putUChar("font", oledFont);
     prefs.putBool("ble", bleEnabled);
     prefs.putUInt("blepin", blePin);
     prefs.putString("call", callsign);
@@ -755,6 +782,7 @@ static void handleCommand(String cmd) {
     savedKey = settingsKey();
     logf("saved\n");
     emitMsg("OK", "settings saved");
+    emitCfg();                             // every console: "unsaved" is now false
   }
   else if (cmd == "/n" || cmd == "/tone") {
     uint32_t ric; String text;
@@ -778,6 +806,16 @@ static void handleCommand(String cmd) {
   else if (cmd == "/led") {
     ledEnabled = (n != 0);
     if (ledEnabled) ledBlink(2, 200); else ledIdle();
+    emitCfg();
+  }
+  else if (cmd == "/font") {
+    String a = arg; a.trim(); a.toLowerCase();
+    int8_t f = -1;
+    for (uint8_t i = 0; i < OLED_FONT_N; i++)
+      if (a == OLED_FONTS[i].name || a == String(i)) f = i;
+    if (f < 0) { emitMsg("ERR", "font: small, medium or large"); return; }
+    oledSetFont(f);
+    logf("font %s\n", OLED_FONTS[f].name);
     emitCfg();
   }
   else if (cmd == "/ble") {

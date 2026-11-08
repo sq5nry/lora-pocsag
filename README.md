@@ -51,6 +51,9 @@ After the first start, set your callsign and RIC (web console, or serial at 1152
 Type `/help` for all commands: frequency correction and carrier for calibration, receive filter
 width, transmit power and time limit, monitor mode for all RICs, stored pages, Bluetooth, DAPNET.
 
+OLED text size: `/font small` (5×7, 9 lines × 25 characters), `/font medium` (8×8, 8 × 16, the
+default) or `/font large` (7×13, 5 × 18); also in the web console under Board. `/save` keeps it.
+
 ### ESP32 DevKit + Ebyte E22-400M30S (1 W)
 
 A third, home-made board: an ESP32-WROOM DevKit with an E22-400M30S module (SX1268 with a

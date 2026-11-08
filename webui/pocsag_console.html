@@ -271,6 +271,12 @@ fieldset:disabled{opacity:.55}
         <button class="btn" id="logClearBtn" type="button" title="Forget the received pages stored on the board">Clear stored pages</button>
       </div>
       <label class="check"><input type="checkbox" id="ledIn"> Blink the board LED on send, receive and heartbeat</label>
+      <label for="fontIn">OLED text size</label>
+      <select id="fontIn">
+        <option value="0">Small — 9 lines × 25 characters</option>
+        <option value="1">Medium — 8 lines × 16 characters</option>
+        <option value="2">Large — 5 lines × 18 characters</option>
+      </select>
       <p class="dirty" id="dirty">Changes are active but not saved. They'll be lost when the board resets.</p>
       <details class="diag" id="dapBox">
         <summary><span class="diag-title">DAPNET<span class="dot" id="dapDot" role="img" aria-label="unknown"></span></span><span class="diag-sum" id="dapSum">not connected</span></summary>
@@ -558,7 +564,7 @@ function fillRics(){
   for (const r of recentRics){ const o = document.createElement("option"); o.value = r; dl.appendChild(o); }
 }
 
-const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led, c.ble, c.call, c.autoid, c.bw, c.txmax, c.dest, c.dap, c.drev, c.web, c.webap].join("|") : "";
+const cfgKey = c => c ? [c.corr, c.ric, c.mon, c.pwr, c.led, c.font, c.ble, c.call, c.autoid, c.bw, c.txmax, c.dest, c.dap, c.drev, c.web, c.webap].join("|") : "";
 function renderCfg(){
   if (!cfg) return;
   $("board").textContent = cfg.board + (cfg.ble && cfg.blename ? `, Bluetooth ${cfg.blename}` : "") +
@@ -577,6 +583,8 @@ function renderCfg(){
   if (document.activeElement !== $("ricIn")) $("ricIn").value = cfg.ric;
   $("monIn").checked = !!cfg.mon;
   $("ledIn").checked = cfg.led !== false;
+  $("fontIn").value = String(cfg.font ?? 1);
+  $("fontIn").disabled = cfg.font === undefined;              // older firmware has no /font
   if (document.activeElement !== $("callIn")) $("callIn").value = cfg.call || "";
   $("autoIdIn").checked = !!cfg.autoid;
   if (Array.isArray(cfg.bws)){
@@ -866,7 +874,7 @@ function handleLine(line){
       if (d.on) toast(`Carrier on for ${d.secs} s`);
       break;
     case "OK":
-      if (/saved/.test(d.msg)) { savedCfg = cfgKey(cfg); renderCfg(); }
+      if (/saved/.test(d.msg) && cfg) { savedCfg = cfgKey(cfg); if (cfg.unsaved !== undefined) cfg.unsaved = false; renderCfg(); }
       toast(d.msg.charAt(0).toUpperCase() + d.msg.slice(1)); break;
     case "ERR":
       if (txPending){ clearTimeout(txPending.timer); txPending = null; setLink("on"); $("txBtn").disabled = false; }
@@ -1124,6 +1132,7 @@ $("ricForm").onsubmit = e => {
 $("monIn").onchange = () => send(`/mon ${$("monIn").checked ? 1 : 0}`);
 $("pwrForm").onsubmit = e => { e.preventDefault(); const v = parseInt($("pwrIn").value, 10); if (!isNaN(v)) send(`/pwr ${v}`); };
 $("ledIn").onchange = () => send(`/led ${$("ledIn").checked ? 1 : 0}`);
+$("fontIn").onchange = () => send(`/font ${$("fontIn").value}`);
 $("bleIn").onchange = () => {
   if (!$("bleIn").checked && link && link.kind === "ble") toast("Bluetooth turned off. Reconnect over USB to turn it back on.");
   send(`/ble ${$("bleIn").checked ? 1 : 0}`);
