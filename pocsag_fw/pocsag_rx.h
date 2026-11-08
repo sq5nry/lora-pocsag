@@ -105,7 +105,7 @@ class Decoder {
       if (++nacc_ == w) {
         char c;
         if (numeric_) c = "0123456789*U -)("[acc_ & 0x0F];
-        else          c = (acc_ < 0x7F) ? (char)acc_ : '.';   // control chars handled in flush()
+        else          c = (char)acc_;   // 7 bits; control chars handled in flush(), 0x7F kept (Skyper 'ß'+1)
         if (len_ < sizeof(text_) - 1) text_[len_++] = c;
         acc_ = 0; nacc_ = 0;
       }
