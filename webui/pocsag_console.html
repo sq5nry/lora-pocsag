@@ -112,6 +112,15 @@ input[type=text],input[type=number],input[type=password],select{width:100%;paddi
 .empty{font:1.5rem/1.3 var(--pix);color:var(--lcd-dim);padding:28px 0}
 /* DAPNET service RICs: dashed tag + one-line explanation under the text */
 .msg-meta .svc{border:1px dashed var(--lcd-ink);color:var(--lcd-ink);padding:0 5px;cursor:help}
+.netlist{list-style:none;margin:6px 0 0;padding:0}
+.netlist li{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px dashed var(--edge)}
+.netlist .net-info{flex:1;min-width:0;display:flex;flex-direction:column}
+.netlist .net-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
+.netlist .net-note{font-size:.78rem;color:var(--ink-2)}
+.netlist .net-note.on{color:var(--ok, #0ca30c);font-weight:600}
+.netlist .btn{padding:2px 9px;font-size:.82rem}
+.netlist .empty-net{color:var(--ink-2);font-size:.85rem;border:0}
+.msg-raw{font:1.15rem/1.2 var(--pix);color:var(--lcd-dim);opacity:.7;word-break:break-all;white-space:pre-wrap;margin-top:2px}
 .msg-hint{font:1.05rem/1.2 var(--pix);color:var(--lcd-dim);margin-top:3px}
 .msg.new{animation:blink .5s steps(1) 3}
 @keyframes blink{50%{background:var(--lcd-2)}}
@@ -239,10 +248,13 @@ fieldset:disabled{opacity:.55}
         <div class="diag-body">
           <label class="check"><input type="checkbox" id="dapIn"> Relay pages from DAPNET</label>
           <p class="hint" id="dapState" aria-live="polite"></p>
-          <form id="wifiForm" class="row row-wrap" style="margin-top:10px">
-            <div><label for="wssidIn">WiFi network</label><input type="text" id="wssidIn" autocomplete="off" spellcheck="false"></div>
-            <div><label for="wpassIn">WiFi password</label><input type="password" id="wpassIn" autocomplete="new-password" placeholder="unchanged"></div>
-            <button class="btn" type="submit">Set WiFi</button>
+          <h3 class="diag-sub">WiFi networks</h3>
+          <p class="hint" style="margin-top:2px">The board joins the strongest known network in range, so add home, work, a phone hotspot…</p>
+          <ul class="netlist" id="netList"></ul>
+          <form id="wifiForm" class="row row-wrap" style="margin-top:8px">
+            <div><label for="wssidIn">Network name (SSID)</label><input type="text" id="wssidIn" autocomplete="off" spellcheck="false" maxlength="32"></div>
+            <div><label for="wpassIn">Password</label><input type="password" id="wpassIn" autocomplete="new-password" maxlength="63" placeholder="empty = open network"></div>
+            <button class="btn" type="submit" id="wifiAddBtn">Add</button>
           </form>
           <form id="dapForm" class="row row-wrap" style="margin-top:10px">
             <div><label for="dnameIn">Transmitter name</label><input type="text" id="dnameIn" autocomplete="off" spellcheck="false" autocapitalize="none"></div>
@@ -371,6 +383,31 @@ const SERVICE_RICS = {
   4520: ["NEWS", "DAPNET news for Skyper pagers; the text is Skyper-encoded (characters shifted by one)."]
 };
 
+// DAPNET time broadcasts -> readable text, or null if the text doesn't parse (e.g. bit errors).
+// 2504: "HHMMSS   DDMMYY" UTC · 200/208: "XTIME=HHMMDDMMYY" (sent twice) UTC / local
+// 216/224: "YYYYMMDDHHMMSS" + "yyMMddHHmm00" UTC / local
+function decodeTime(ric, text){
+  if (!text) return null;
+  let v = null, utc = true;
+  let m;
+  if (ric === 2504 && (m = /^(\d\d)(\d\d)(\d\d)\s+(\d\d)(\d\d)(\d\d)/.exec(text)))
+    v = {h:+m[1], mi:+m[2], s:+m[3], d:+m[4], mo:+m[5], y:2000 + +m[6]};
+  else if ((ric === 200 || ric === 208) && (m = /XTIME=(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)/.exec(text))){
+    v = {h:+m[1], mi:+m[2], s:0, d:+m[3], mo:+m[4], y:2000 + +m[5]}; utc = ric === 200;
+  }
+  else if ((ric === 216 || ric === 224) && (m = /YYYYMMDDHHMMSS(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)/.exec(text))){
+    v = {y:2000 + +m[1], mo:+m[2], d:+m[3], h:+m[4], mi:+m[5], s:+m[6]}; utc = ric === 216;
+  }
+  if (!v || v.mo < 1 || v.mo > 12 || v.d < 1 || v.d > 31 || v.h > 23 || v.mi > 59 || v.s > 59) return null;
+  const t = new Date(Date.UTC(v.y, v.mo - 1, v.d, v.h, v.mi, v.s));
+  if (t.getUTCDate() !== v.d) return null;                       // e.g. 31 Feb
+  const when = t.toLocaleString(undefined, {timeZone: "UTC", weekday: "short", day: "numeric", month: "short",
+    year: "numeric", hour: "2-digit", minute: "2-digit", second: v.s || ric === 2504 || ric >= 216 ? "2-digit" : undefined});
+  if (!utc) return `${when} (DAPNET local time)`;
+  const mine = t.toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit"});
+  return `${when} UTC (${mine} here)`;
+}
+
 function renderMsgs(newId){
   const ul = $("msgs"); ul.textContent = "";
   if (!messages.length){
@@ -398,8 +435,13 @@ function renderMsgs(newId){
       meta.appendChild(s);
     }
     const text = document.createElement("div"); text.className = "msg-text";
-    text.textContent = m.text ? m.text : (m.kind === "t" || m.dir === "rx" ? "♪ tone" : "");
+    const human = SERVICE_RICS[m.ric] && SERVICE_RICS[m.ric][0] === "TIME" ? decodeTime(m.ric, m.text) : null;
+    text.textContent = human || (m.text ? m.text : (m.kind === "t" || m.dir === "rx" ? "♪ tone" : ""));
     li.append(meta, text);
+    if (human){                               // the page as it was sent, fainter
+      const raw = document.createElement("div"); raw.className = "msg-raw"; raw.textContent = m.text;
+      li.appendChild(raw);
+    }
     if (SERVICE_RICS[m.ric]){
       const h = document.createElement("div"); h.className = "msg-hint"; h.textContent = SERVICE_RICS[m.ric][1];
       li.appendChild(h);
@@ -476,8 +518,7 @@ function renderCfg(){
   $("pagerRic").textContent = cfg.mon ? "ALL RICS" : "RIC " + cfg.ric;
   if (cfg.dap !== undefined){
     $("dapIn").checked = !!cfg.dap;
-    if (document.activeElement !== $("wssidIn")) $("wssidIn").value = cfg.wssid || "";
-    $("wpassIn").placeholder = cfg.wpass ? "unchanged" : "none";
+    renderNets();
     if (document.activeElement !== $("dnameIn")) $("dnameIn").value = cfg.dname || "";
     $("dkeyIn").placeholder = cfg.dkey ? "unchanged" : "not set";
     if (document.activeElement !== $("dsrvIn")) $("dsrvIn").value = cfg.dsrv || "";
@@ -492,11 +533,39 @@ function renderCfg(){
 
 /* ---------- DAPNET ---------- */
 let dapSt = null;
+// known WiFi networks (from @CFG) with the one in use / being tried (from @DAP)
+function renderNets(){
+  const ul = $("netList"); ul.textContent = "";
+  const nets = (cfg && cfg.wnets) || [];
+  if (!nets.length){
+    const li = document.createElement("li"); li.className = "empty-net"; li.textContent = "No networks yet.";
+    ul.appendChild(li);
+  }
+  for (const n of nets){
+    const li = document.createElement("li");
+    const name = document.createElement("span"); name.className = "net-name"; name.textContent = n.ssid; name.title = n.ssid;
+    const note = document.createElement("span"); note.className = "net-note";
+    const cur = dapSt && dapSt.ssid === n.ssid;
+    if (cur && dapSt.ip){ note.textContent = `connected, ${dapSt.wrssi} dBm`; note.classList.add("on"); }
+    else if (cur) note.textContent = "trying…";
+    else note.textContent = n.pass ? "password set" : "open";
+    const rm = document.createElement("button"); rm.type = "button"; rm.className = "btn"; rm.textContent = "Remove";
+    rm.onclick = () => send(`/wifi del ${n.ssid}`);
+    const info = document.createElement("div"); info.className = "net-info"; info.append(name, note);
+    li.append(info, rm); ul.appendChild(li);
+  }
+  const full = cfg && cfg.wmax && nets.length >= cfg.wmax;
+  $("wifiAddBtn").disabled = !!full;
+  $("wifiAddBtn").title = full ? `The board keeps up to ${cfg.wmax} networks` : "";
+  const known = nets.some(n => n.ssid === $("wssidIn").value.trim());
+  $("wifiAddBtn").textContent = known ? "Change password" : "Add";
+}
+
 function renderDap(){
   const on = cfg && cfg.dap;
   if (!on){
     $("dapSum").textContent = "off";
-    const missing = cfg ? [!cfg.wssid && "WiFi", !cfg.dname && "transmitter name", !cfg.dkey && "auth key"].filter(Boolean) : [];
+    const missing = cfg ? [!(cfg.wnets && cfg.wnets.length) && "a WiFi network", !cfg.dname && "transmitter name", !cfg.dkey && "auth key"].filter(Boolean) : [];
     $("dapState").textContent = missing.length ? `Needs ${missing.join(", ")}.` : "Ready. Tick the box to connect.";
     return;
   }
@@ -505,6 +574,8 @@ function renderDap(){
   $("dapSum").textContent = d.online ? `online, slots ${d.slots || "none"}` : d.state;
   const parts = [d.online ? "Online" : d.state.charAt(0).toUpperCase() + d.state.slice(1)];
   if (d.ip) parts.push(`WiFi ${d.ip}, ${d.wrssi} dBm`);
+  if (!d.ip && d.scan) parts.push("scanning for known networks");
+  else if (!d.ip && d.ssid) parts.push(`trying ${d.ssid}`);
   if (d.online) parts.push(d.slots ? `slots ${d.slots.split("").join(" ")}` : "no slots assigned yet");
   parts.push(`${d.rx} received, ${d.tx} sent` + (d.q ? `, ${d.q} waiting` : "") + (d.drop ? `, ${d.drop} dropped` : ""));
   $("dapState").textContent = parts.join(" · ");
@@ -600,7 +671,7 @@ function handleLine(line){
       }
       break;
     case "DAP":
-      dapSt = d; renderDap(); break;
+      dapSt = d; renderDap(); renderNets(); break;
     case "TX":
       if (d.src === "dapnet"){                 // relayed for DAPNET: list it, nothing else
         addMsg({dir:"tx", ric:d.ric, kind:d.kind, func:d.func, text:d.text, air:d.airtime, via:"DAPNET",
@@ -630,7 +701,7 @@ function handleLine(line){
 async function send(cmd){
   if (!link) { toast("Connect the board first", true); return; }
   // don't put secrets on screen
-  const shown = cmd.replace(/^(\/wifi [^|]*\|).+$/, "$1•••").replace(/^(\/dapnet key ).+$/i, "$1•••");
+  const shown = cmd.replace(/^(\/wifi (?:add )?[^|]*\|).+$/i, "$1•••").replace(/^(\/dapnet key ).+$/i, "$1•••");
   logLine("> " + shown, "out");
   try { await link.write(cmd + "\n"); }
   catch(e){ logLine("Send failed: " + e.message, "e"); toast("Couldn't send to the board: " + e.message, true); }
@@ -855,11 +926,12 @@ $("dapIn").onchange = () => send(`/dapnet ${$("dapIn").checked ? 1 : 0}`);
 $("wifiForm").onsubmit = e => {
   e.preventDefault();
   const ssid = $("wssidIn").value.trim(), pass = $("wpassIn").value;
-  if (!ssid){ send("/wifi -"); return; }
+  if (!ssid){ toast("Type the network name", true); return; }
   if (/[|\r\n]/.test(ssid)){ toast("The network name can't contain |", true); return; }
-  if (!pass && cfg && cfg.wpass && ssid === cfg.wssid){ toast("Nothing changed"); return; }
-  send(`/wifi ${ssid}|${pass}`); $("wpassIn").value = "";
+  if (pass && pass.length < 8){ toast("WiFi passwords have at least 8 characters", true); return; }
+  send(`/wifi add ${ssid}|${pass}`); $("wssidIn").value = ""; $("wpassIn").value = ""; renderNets();
 };
+$("wssidIn").oninput = renderNets;
 $("dapForm").onsubmit = async e => {
   e.preventDefault();
   const name = $("dnameIn").value.trim(), key = $("dkeyIn").value.trim();

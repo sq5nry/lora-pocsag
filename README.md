@@ -82,18 +82,22 @@ from NTP). Local pages from the console still go out at once.
 1. Register at [hampager.de](https://hampager.de) (amateur licence needed): a user account with
    your RIC, and a **transmitter** (support ticket "New DAPNET Transmitter"; a home node is type
    *personal*). You get a transmitter name and an **auth key** – not your user password.
-2. In the web console, *Board → DAPNET*: WiFi network and password, transmitter name, auth key,
-   then tick *Relay pages from DAPNET* and *Save settings to board*. Or over serial:
+2. In the web console, *Board → DAPNET*: add your WiFi networks (up to 8: home, work, a phone
+   hotspot…), the transmitter name and auth key, then tick *Relay pages from DAPNET* and
+   *Save settings to board*. Wherever the board is, it joins the strongest known network in range,
+   and also tries the others in case they are hidden. Or over serial:
 
    ```
-   /wifi MyNetwork|wifi-password
+   /wifi add MyNetwork|wifi-password
+   /wifi add Phone hotspot|other-password
    /dapnet name sq5nry
    /dapnet key <auth key>
    /dapnet 1
    /save
    ```
 
-3. `/dapnet` shows the link state; the console shows it live: online, assigned slots, pages
+3. `/wifi` lists the known networks, `/wifi del <name>` removes one, `/wifi clear` all of them.
+   `/dapnet` shows the link state; the console shows it live: online, assigned slots, pages
    received / sent / waiting. Relayed pages show up in the message list as *SENT via DAPNET*.
 
 Pages longer than the transmit time limit (`/txmax`) are dropped, and DAPNET time broadcasts

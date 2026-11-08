@@ -15,7 +15,7 @@
     @RSSI live signal level   @LOGEND end of /log replay   @CAL board-to-board tuning   @OK / @ERR
     @DAP DAPNET link status
 
-  DAPNET: with WiFi set (/wifi) and a registered transmitter (/dapnet name, /dapnet key), /dapnet 1
+  DAPNET: with WiFi networks known (/wifi add) and a registered transmitter (/dapnet name, /dapnet key), /dapnet 1
   logs the board into the DAPNET core; pages routed to it go out in its assigned time slots.
 */
 
@@ -188,9 +188,13 @@ static void emitCfg() {
     callsign, autoId ? "true" : "false", PWR_NOTE,
     rxBw, BW_SINGLE_SIDED ? "true" : "false", txMax, TXMAX_MIN, TXMAX_MAX, MsgLog::LOG_N,
     (unsigned long)lastDest);
-  String d = ",\"dap\":" + String(dapOn ? "true" : "false") + ",\"wssid\":";
-  jsonStr(d, dap.ssid.c_str());
-  d += ",\"wpass\":" + String(dap.pass.length() ? "true" : "false") + ",\"dsrv\":";
+  String d = ",\"dap\":" + String(dapOn ? "true" : "false") + ",\"wnets\":[";
+  for (uint8_t i = 0; i < dap.netCount; i++) {          // passwords never leave the board
+    if (i) d += ',';
+    d += "{\"ssid\":"; jsonStr(d, dap.nets[i].ssid.c_str());
+    d += ",\"pass\":" + String(dap.nets[i].pass.length() ? "true" : "false") + "}";
+  }
+  d += "],\"wmax\":" + String(Dapnet::MAX_NETS) + ",\"dsrv\":";
   jsonStr(d, (dap.host + ":" + String(dap.port)).c_str());
   d += ",\"dname\":";
   jsonStr(d, dap.name.c_str());
@@ -370,6 +374,9 @@ static void emitDap() {
              ",\"slots\":\"" + dap.slotText() + "\",\"slot\":" + String(slot) +
              ",\"q\":" + String(dap.queued()) + ",\"rx\":" + String(dap.rxCount) +
              ",\"tx\":" + String(dap.txCount) + ",\"drop\":" + String(dap.dropCount);
+  String ws = dap.wifiSsid();
+  if (ws.length()) { j += ",\"ssid\":"; jsonStr(j, ws.c_str()); }
+  if (dap.wifiSearching()) j += ",\"scan\":true";
   if (WiFi.status() == WL_CONNECTED)
     j += ",\"ip\":\"" + WiFi.localIP().toString() + "\",\"wrssi\":" + String(WiFi.RSSI());
   j += "}";
@@ -414,7 +421,7 @@ static void dapCommand(String arg) {
   if (sub == "" ) { logf("DAPNET %s\n", dapOn ? dap.stateName() : "off"); emitDap(); return; }
   if (sub == "1" || sub == "on" || sub == "0" || sub == "off") {
     dapOn = (sub == "1" || sub == "on");
-    if (dapOn && !dap.configured()) emitMsg("ERR", "set /wifi, /dapnet name and /dapnet key first");
+    if (dapOn && !dap.configured()) emitMsg("ERR", "add a network with /wifi add, set /dapnet name and /dapnet key first");
     dapApply();
   }
   else if (sub == "name") {
@@ -438,19 +445,45 @@ static void dapCommand(String arg) {
   emitCfg();
 }
 
+// /wifi                 list known networks
+// /wifi add SSID|PASS    add one, or change its password (also: /wifi SSID|PASS, /wifi SSID PASS)
+// /wifi del SSID         forget one (or its number from the list)
+// /wifi clear            forget all (also: /wifi -)
+static void wifiList() {
+  if (!dap.netCount) { logf("WiFi: none\n"); return; }
+  for (uint8_t i = 0; i < dap.netCount; i++)
+    out.printf("  %u  %s%s\n", i + 1, dap.nets[i].ssid.c_str(), dap.nets[i].pass.length() ? "" : "  (open)");
+}
 static void wifiCommand(String arg) {
-  if (arg == "-") { dap.ssid = ""; dap.pass = ""; }
-  else {
+  String sub = arg, val;
+  int sp = arg.indexOf(' ');
+  if (sp > 0) { sub = arg.substring(0, sp); val = arg.substring(sp + 1); val.trim(); }
+  String lsub = sub; lsub.toLowerCase();
+  if (!arg.length()) { wifiList(); emitCfg(); return; }
+  if (arg == "-" || lsub == "clear") {
+    dap.clearNets();
+    emitMsg("OK", "all WiFi networks forgotten");
+  } else if (lsub == "del" || lsub == "rm") {
+    int8_t i = dap.findNet(val);
+    if (i < 0 && val.length() && val.length() <= 2 && isdigit((unsigned char)val[0])) i = (int8_t)(val.toInt() - 1);
+    if (i < 0 || !dap.removeNet((uint8_t)i)) { emitMsg("ERR", "no such WiFi network (see /wifi)"); return; }
+    emitMsg("OK", "WiFi network forgotten");
+  } else {
+    String e = (lsub == "add") ? val : arg;          // "/wifi SSID|PASS" still works
     // "SSID|PASSWORD" (SSID may contain spaces), or "SSID PASSWORD" split at the last space
-    if (!arg.length()) { emitMsg("ERR", "use /wifi SSID PASSWORD (or /wifi - to clear)"); return; }
-    int sp = arg.indexOf('|');
-    if (sp < 0) sp = arg.lastIndexOf(' ');
-    if (sp > 0) { dap.ssid = arg.substring(0, sp); dap.pass = arg.substring(sp + 1); }
-    else { dap.ssid = arg; dap.pass = ""; }
+    int k = e.indexOf('|');
+    if (k < 0) k = e.lastIndexOf(' ');
+    String ss = k > 0 ? e.substring(0, k) : e, pw = k > 0 ? e.substring(k + 1) : String();
+    if (!ss.length() || ss.length() > 32 || pw.length() > 63) { emitMsg("ERR", "use /wifi add SSID|PASSWORD"); return; }
+    bool known = dap.findNet(ss) >= 0;
+    if (!dap.addNet(ss, pw)) {
+      char m[64]; snprintf(m, sizeof m, "WiFi list full (%u networks), remove one first", Dapnet::MAX_NETS);
+      emitMsg("ERR", m); return;
+    }
+    emitMsg("OK", known ? "WiFi password changed" : "WiFi network added");
   }
   if (dapOn) dapApply();
   dapRev++;
-  emitMsg("OK", dap.ssid.length() ? "WiFi set" : "WiFi cleared");
   emitCfg();
 }
 
@@ -486,7 +519,8 @@ static void help() {
     "  /log            replay stored received pages   /logclear  forget them\n"
     "  /led 0|1        status LED patterns\n"
     "  /ble 0|1        Bluetooth LE console   /blepin NNNNNN   /bleforget\n"
-    "  /wifi SSID PASS WiFi for DAPNET (SSID|PASS if the SSID has spaces; /wifi - clears)\n"
+    "  /wifi           list WiFi networks for DAPNET (up to 8, tried wherever you are)\n"
+    "  /wifi add SSID|PASS   add one or change its password   /wifi del SSID   /wifi clear\n"
     "  /dapnet [0|1]   DAPNET transmitter link on/off; no argument = status\n"
     "  /dapnet name N  transmitter name as registered   /dapnet key K  its auth key\n"
     "  /dapnet server host[:port]  (default dapnet.afu.rwth-aachen.de:43434)\n"
@@ -583,8 +617,13 @@ static void handleCommand(String cmd) {
     prefs.putUChar("txmax", txMax);
     prefs.putUInt("dest", lastDest);
     prefs.putBool("dapon", dapOn);
-    prefs.putString("wssid", dap.ssid);
-    prefs.putString("wpass", dap.pass);
+    prefs.putUChar("wn", dap.netCount);
+    for (uint8_t i = 0; i < Dapnet::MAX_NETS; i++) {
+      char ks[6], kp[6]; snprintf(ks, sizeof ks, "ws%u", i); snprintf(kp, sizeof kp, "wp%u", i);
+      if (i < dap.netCount) { prefs.putString(ks, dap.nets[i].ssid); prefs.putString(kp, dap.nets[i].pass); }
+      else if (prefs.isKey(ks)) { prefs.remove(ks); prefs.remove(kp); }
+    }
+    if (prefs.isKey("wssid")) { prefs.remove("wssid"); prefs.remove("wpass"); }   // old single-network keys
     prefs.putString("daphost", dap.host);
     prefs.putUShort("dapport", dap.port);
     prefs.putString("dapname", dap.name);
@@ -672,8 +711,15 @@ void setup() {
   rxBw       = bwNearest(prefs.getFloat("bw", BW_DEFAULT));
   lastDest   = prefs.getUInt("dest", DEFAULT_DEST);
   dapOn      = prefs.getBool("dapon", false);
-  dap.ssid   = prefs.getString("wssid", "");
-  dap.pass   = prefs.getString("wpass", "");
+  {
+    uint8_t wn = prefs.getUChar("wn", 0);
+    for (uint8_t i = 0; i < wn && i < Dapnet::MAX_NETS; i++) {
+      char ks[6], kp[6]; snprintf(ks, sizeof ks, "ws%u", i); snprintf(kp, sizeof kp, "wp%u", i);
+      dap.addNet(prefs.getString(ks, ""), prefs.getString(kp, ""));
+    }
+    String old = prefs.getString("wssid", "");      // settings saved by the single-network version
+    if (old.length()) dap.addNet(old, prefs.getString("wpass", ""));
+  }
   dap.host   = prefs.getString("daphost", dap.host);
   dap.port   = prefs.getUShort("dapport", dap.port);
   dap.name   = prefs.getString("dapname", "");
