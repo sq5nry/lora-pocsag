@@ -5,6 +5,12 @@
 
 **[Open the web console](https://sq5nry.github.io/lora-pocsag/webui/pocsag_console.html)** to connect to a board over USB or Bluetooth (Chrome or Edge; on Android use Bluetooth).
 
+On iPhone and iPad, Safari and every other browser lack Web Bluetooth and Web Serial. Use the free
+[Bluefy – Web BLE Browser](https://apps.apple.com/app/id1492822055) from the App Store instead:
+open the console link in Bluefy, tap *Connect Bluetooth*, and enter the PIN from the board's
+display when iOS asks to pair. USB doesn't work on iOS. On a Mac, Chrome or Edge work as on any
+desktop.
+
 ![Web console: pager-style message list with send, frequency and receiver controls](media/ui.png)
 
 ## Firmware
@@ -109,3 +115,14 @@ The boards briefly switch to LoRa, whose receiver measures the frequency error o
 the tuned board corrects itself in a few rounds to within about 100 Hz. Save with `/save`.
 
 The Heltec V3 must be the 433/470–510 MHz variant; the 868/915 MHz board is matched for that band.
+
+## How reception works
+
+From antenna to bits, simulated on a weak signal (Eb/N0 15 dB, ±7.8 kHz receive filter, 900 Hz
+frequency error). Part 1 follows the signal through the radio chip to complex baseband (I/Q):
+spectrum, I and Q, the spinning phasor and its phase. Part 2 turns the phase into bits:
+discriminator, data filter and slicer, then the bit synchroniser that recovers the 1200 Hz clock
+during the preamble. All of this runs inside the SX1278 / SX126x; the firmware takes over at the
+bits (frame sync, error correction, decoding).
+
+![POCSAG receiver from antenna to bits: block diagram, baseband spectrum, I/Q, phasors, phase, discriminator output, data filter and slicer, bit clock recovery](media/pocsag_receiver_steps.png)

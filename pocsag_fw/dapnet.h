@@ -198,8 +198,11 @@ class Dapnet {
   DapPage  q_[QLEN];
   uint8_t  qh_ = 0, qn_ = 0;
 
+  // DAPNET time broadcasts (DAPNET core SkyperProtocol): 2504 numeric HHMMSS DDMMYY (UTC),
+  // 200 / 208 Swissphone "XTIME=" (UTC / local), 216 / 224 AlphaPoc "YYYYMMDDHHMMSS..." (UTC / local)
   static bool isTimeMsg(const DapPage& p) {
-    return (p.type == 5 && p.func == 0) || (p.type == 6 && p.func == 3 && !strncmp(p.text, "XTIME=", 6));
+    switch (p.ric) { case 200: case 208: case 216: case 224: case 2504: return true; }
+    return !strncmp(p.text, "XTIME=", 6) || !strncmp(p.text, "YYYYMMDDHHMMSS", 14);
   }
   void setState(State s) { if (s != st_) { st_ = s; stateSince_ = millis(); changed(); } }
   void changed() { if (onChange) onChange(); }
