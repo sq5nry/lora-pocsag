@@ -110,6 +110,9 @@ input[type=text],input[type=number],input[type=password],select{width:100%;paddi
 .msg.out .msg-text{color:var(--lcd-dim)}
 .msg.err .msg-meta .flag{color:var(--bad)}
 .empty{font:1.5rem/1.3 var(--pix);color:var(--lcd-dim);padding:28px 0}
+/* DAPNET service RICs: dashed tag + one-line explanation under the text */
+.msg-meta .svc{border:1px dashed var(--lcd-ink);color:var(--lcd-ink);padding:0 5px;cursor:help}
+.msg-hint{font:1.05rem/1.2 var(--pix);color:var(--lcd-dim);margin-top:3px}
 .msg.new{animation:blink .5s steps(1) 3}
 @keyframes blink{50%{background:var(--lcd-2)}}
 
@@ -356,6 +359,18 @@ const fmtTime = ts => ts == null ? "EARLIER" :
     ? new Date(ts).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"})
     : new Date(ts).toLocaleString([], {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"}));
 
+// RICs DAPNET uses for network services rather than personal pages (from the DAPNET core)
+const SERVICE_RICS = {
+  8:    ["ID",   "DAPNET transmitter identification: the transmitter's registered name, sent every few minutes."],
+  200:  ["TIME", "DAPNET time for Swissphone pagers (XTIME=HHMMDDMMYY, UTC)."],
+  208:  ["TIME", "DAPNET time for Swissphone pagers (XTIME=HHMMDDMMYY, local time)."],
+  216:  ["TIME", "DAPNET time for AlphaPoc pagers (yyMMddHHmm00 after the YYYYMMDDHHMMSS marker, UTC)."],
+  224:  ["TIME", "DAPNET time for AlphaPoc pagers (yyMMddHHmm00 after the YYYYMMDDHHMMSS marker, local time)."],
+  2504: ["TIME", "DAPNET time, numeric: HHMMSS DDMMYY (UTC)."],
+  4512: ["NEWS", "DAPNET rubric names for Skyper pagers; the text is Skyper-encoded (characters shifted by one)."],
+  4520: ["NEWS", "DAPNET news for Skyper pagers; the text is Skyper-encoded (characters shifted by one)."]
+};
+
 function renderMsgs(newId){
   const ul = $("msgs"); ul.textContent = "";
   if (!messages.length){
@@ -369,6 +384,7 @@ function renderMsgs(newId){
     const meta = document.createElement("div"); meta.className = "msg-meta";
     const parts = [
       ["dir", m.dir === "tx" ? "SENT" : "RECV"], ["", fmtTime(m.ts)], ["", "RIC " + m.ric],
+      SERVICE_RICS[m.ric] ? ["svc", SERVICE_RICS[m.ric][0], SERVICE_RICS[m.ric][1]] : null,
       m.via ? ["", "via " + m.via] : null,
       m.func != null ? ["", "F" + m.func] : null,
       m.rssi != null ? ["", m.rssi + " dBm"] : null,
@@ -376,10 +392,19 @@ function renderMsgs(newId){
       m.air ? ["", m.air.toFixed(1) + " s"] : null,
       m.err ? ["flag", m.err] : null
     ].filter(Boolean);
-    for (const [c, t] of parts){ const s = document.createElement("span"); if (c) s.className = c; s.textContent = t; meta.appendChild(s); }
+    for (const [c, t, tip] of parts){
+      const s = document.createElement("span"); if (c) s.className = c; s.textContent = t;
+      if (tip) s.title = tip;
+      meta.appendChild(s);
+    }
     const text = document.createElement("div"); text.className = "msg-text";
     text.textContent = m.text ? m.text : (m.kind === "t" || m.dir === "rx" ? "♪ tone" : "");
-    li.append(meta, text); ul.appendChild(li);
+    li.append(meta, text);
+    if (SERVICE_RICS[m.ric]){
+      const h = document.createElement("div"); h.className = "msg-hint"; h.textContent = SERVICE_RICS[m.ric][1];
+      li.appendChild(h);
+    }
+    ul.appendChild(li);
   }
 }
 // ts: when it happened (null = before the board's last restart); quiet: no highlight
