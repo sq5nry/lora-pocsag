@@ -267,16 +267,8 @@ fieldset:disabled{opacity:.55}
       <h2 id="h-dev">Board</h2>
       <div class="board-btns">
         <button class="btn wide" id="saveBtn" type="button">Save settings to board</button>
-        <button class="btn" id="clsBtn" type="button">Clear OLED</button>
-        <button class="btn" id="logClearBtn" type="button" title="Forget the received pages stored on the board">Clear stored pages</button>
+        <button class="btn wide" id="logClearBtn" type="button" title="Forget the received pages stored on the board">Clear stored pages</button>
       </div>
-      <label class="check"><input type="checkbox" id="ledIn"> Blink the board LED on send, receive and heartbeat</label>
-      <label for="fontIn">OLED text size</label>
-      <select id="fontIn">
-        <option value="0">Small — 9 lines × 25 characters</option>
-        <option value="1">Medium — 8 lines × 16 characters</option>
-        <option value="2">Large — 5 lines × 18 characters</option>
-      </select>
       <p class="dirty" id="dirty">Changes are active but not saved. They'll be lost when the board resets.</p>
       <details class="diag" id="dapBox">
         <summary><span class="diag-title">DAPNET<span class="dot" id="dapDot" role="img" aria-label="unknown"></span></span><span class="diag-sum" id="dapSum">not connected</span></summary>
@@ -333,6 +325,24 @@ fieldset:disabled{opacity:.55}
           <label class="check"><input type="checkbox" id="webApIn"> Open the board's own WiFi when no known network is in range</label>
           <p class="hint" id="webApHint">Network name is the board's Bluetooth name, its password is the web password; the console is then at http://192.168.4.1/. It closes after 10 minutes if nobody connects.</p>
           <p class="hint">Plain HTTP: the password travels unencrypted over the local network. USB and Bluetooth aren't available in a page served by the board; it talks to the board over WiFi.</p>
+        </div>
+      </details>
+
+      <details class="diag" id="dispBox">
+        <summary><span class="diag-title">Display and LED</span><span class="diag-sum" id="dispSum">not connected</span></summary>
+        <div class="diag-body">
+          <label for="fontIn">OLED text size<span class="info" tabindex="0" role="note"
+            data-tip="Small: 25 characters per line. Medium: 16. Large: 18, bigger and easier to read from a distance."
+            aria-label="Small: 25 characters per line. Medium: 16. Large: 18, bigger and easier to read from a distance.">i</span></label>
+          <div class="row">
+            <select id="fontIn">
+              <option value="0">Small, 9 lines</option>
+              <option value="1">Medium, 8 lines</option>
+              <option value="2">Large, 5 lines</option>
+            </select>
+            <button class="btn" id="clsBtn" type="button">Clear OLED</button>
+          </div>
+          <label class="check"><input type="checkbox" id="ledIn"> Blink the board LED on send, receive and heartbeat</label>
         </div>
       </details>
 
@@ -577,6 +587,7 @@ function renderCfg(){
   $("effFreq").innerHTML = ""; $("effFreq").append(cfg.eff.toFixed(5));
   const sm = document.createElement("small"); sm.textContent = "MHz"; $("effFreq").appendChild(sm);
   $("corrText").textContent = `Correction ${cfg.corr > 0 ? "+" : ""}${cfg.corr} Hz from ${cfg.freq.toFixed(4)} MHz, ${cfg.baud} bps`;
+  $("dispSum").textContent = `${["small", "medium", "large"][cfg.font ?? 1]}, LED ${cfg.led !== false ? "on" : "off"}`;
   $("calSum").textContent = `${cfg.eff.toFixed(5)} MHz, ${cfg.corr > 0 ? "+" : ""}${cfg.corr} Hz`;
   $("stepHint").textContent = `Tuning resolution on this board is about ${cfg.step} Hz.`;
   if (document.activeElement !== $("corrIn")) $("corrIn").value = cfg.corr;
@@ -801,8 +812,9 @@ function handleLine(line){
   switch (type){
     case "CFG":
       cfg = d; renderCfg();
-      if (link && !logRequested && typeof d.up === "number" && d.up < 15 && link.kind === "usb")
-        toast("The board restarted when the USB port was opened (its auto-reset). WiFi, DAPNET and other connections come back within a minute.");
+      if (link && !logRequested && typeof d.up === "number" && d.up < 60)
+        toast(`The board started ${d.up} s ago` + (link.kind === "usb" ? " (opening or closing the USB port can reset some boards)" : "") +
+              ". WiFi, DAPNET and other connections come back within a minute.");
       if (link && !logRequested){
         logRequested = true; logNew = 0; send("/log");
         if (d.dest && document.activeElement !== $("txRic")) { $("txRic").value = d.dest; updateCount(); }
@@ -918,8 +930,12 @@ async function connectUsb(){
     if (e.name !== "NotFoundError") toast("Couldn't open the port: " + e.message, true);
     port = null; return;
   }
-  // CP210x auto-reset: release DTR/RTS so EN and IO0 are high and the ESP32 runs normally
-  try { await port.setSignals({ dataTerminalReady:false, requestToSend:false }); } catch(e){}
+  // Auto-reset circuit of ESP32 boards: EN (reset) is pulled low while RTS is asserted and DTR is
+  // not. The browser opens the port with both asserted (no reset). Release RTS first, then DTR:
+  // the other order passes through "RTS only" and resets the board. (A combined setSignals call
+  // also changes DTR first, so it has to be two calls.)
+  try { await port.setSignals({ requestToSend:false }); } catch(e){}
+  try { await port.setSignals({ dataTerminalReady:false }); } catch(e){}
   writer = port.writable.getWriter();
   keepReading = true;
   const enc = new TextEncoder();
@@ -1046,6 +1062,7 @@ async function disconnect(lost){
   $("wifiBtn").hidden = !servedByBoard;
   $("board").textContent = "No board connected";
   $("calSum").textContent = "not connected";
+  $("dispSum").textContent = "not connected";
   $("bleSum").textContent = "not connected";
   dapSt = null; $("dapSum").textContent = "not connected"; $("dapState").textContent = "";
   netSt = null; renderWeb(); renderWifi(); renderDots();
